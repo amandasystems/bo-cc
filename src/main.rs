@@ -35,10 +35,10 @@ async fn manager(
             NoForms { url: _ } => nr_no_forms += 1,
             NotHTML { bad_mimetype: _ } | UnknownEncoding => (),
         }
-        println!(
-            "NO FORM: {}, FORMS: {}, FORMS WITH PATTERNS: {}",
-            nr_no_forms, nr_forms_seen, nr_forms_w_pattern
-        );
+        // println!(
+        //     "NO FORM: {}, FORMS: {}, FORMS WITH PATTERNS: {}",
+        //     nr_no_forms, nr_forms_seen, nr_forms_w_pattern
+        // );
     }
 
     Ok(())
@@ -65,23 +65,30 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
     prepare_db(&db).await; // We must finish preparing the DB before allocating to it.
 
-    let mut tasks = Vec::new();
+    let (tx_path, mut rx_path) = mpsc::channel(5);
+
+    let process_paths = tokio::spawn(async move {
+        let mut tasks = Vec::new();
+        while let Some(path) = rx_path.recv().await {
+            tasks.push(analyse_warc(path, db_submit.clone()));
+        }
+
+        for outcome in futures::future::join_all(tasks).await {
+            if let Err(e) = outcome {
+                println!("Task error: {}", e);
+            }
+        }
+    });
 
     for path in paths {
         println!("Analysing {}", &path);
-        tasks.push(analyse_warc(path, db_submit.clone()));
+        tx_path.send(path).await?;
     }
 
-    drop(db_submit); // No one else in this thread will submit
+    drop(tx_path);
 
     let manager_future = tokio::spawn(manager(db_receive, db));
-
-    for outcome in futures::future::join_all(tasks).await {
-        if let Err(e) = outcome {
-            println!("Task error: {}", e);
-        }
-    }
+    process_paths.await?;
     manager_future.await??;
-
     Ok(())
 }
