@@ -1,7 +1,10 @@
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
+use std::time::Duration;
 use std::{env, error, io};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+use tokio::time::sleep;
 
 use bo_cc::{analyse_warc, prepare_db, AnalysisResult};
 
@@ -41,6 +44,8 @@ async fn manager(
         // );
     }
 
+    println!("All channels closed!");
+
     Ok(())
 }
 
@@ -65,29 +70,39 @@ async fn main() -> Result<(), Box<dyn error::Error>> {
 
     prepare_db(&db).await; // We must finish preparing the DB before allocating to it.
 
-    let (tx_path, mut rx_path) = mpsc::channel(5);
+    let (tx_path, mut rx_path) = mpsc::channel(10);
 
     let process_paths = tokio::spawn(async move {
-        let mut tasks = Vec::new();
+        let mut analysis_tasks = JoinSet::new();
         while let Some(path) = rx_path.recv().await {
-            tasks.push(analyse_warc(path, db_submit.clone()));
+            println!("Analysing {}", &path);
+            analysis_tasks.spawn(analyse_warc(path, db_submit.clone()));
+
+            if analysis_tasks.len() > 2 {
+                if let Err(e) = analysis_tasks.join_next().await.unwrap() {
+                    println!("Task error: {}", e);
+                }
+            }
         }
 
-        for outcome in futures::future::join_all(tasks).await {
+        // Drain the queue
+        while let Some(outcome) = analysis_tasks.join_next().await {
             if let Err(e) = outcome {
                 println!("Task error: {}", e);
             }
         }
     });
 
+    let manager_future = tokio::spawn(manager(db_receive, db));
+
     for path in paths {
-        println!("Analysing {}", &path);
         tx_path.send(path).await?;
     }
 
+    println!("All paths submitted!");
+
     drop(tx_path);
 
-    let manager_future = tokio::spawn(manager(db_receive, db));
     process_paths.await?;
     manager_future.await??;
     Ok(())

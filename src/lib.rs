@@ -163,13 +163,10 @@ pub async fn analyse_warc(
         {
             let pipe = out_pipe.clone();
             workers.spawn(async move {
-                pipe.send(
-                    tokio::task::spawn_blocking(move || analyse_record(record))
-                        .await
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
+                let analysis_result = tokio::task::spawn_blocking(move || analyse_record(record))
+                    .await
+                    .unwrap();
+                pipe.send(analysis_result).await.unwrap();
             });
         }
         workers
