@@ -11,13 +11,10 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 #[derive(Debug)]
 pub enum AnalysisResult {
+    WarcDone,
     UnknownEncoding,
-    NotHTML {
-        bad_mimetype: String,
-    },
-    NoForms {
-        url: String,
-    },
+    NotHTML,
+    NoForms,
     NoFormsWithPatterns {
         url: String,
         nr_forms: usize,
@@ -74,9 +71,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         .unwrap();
 
     if !(content_type == "text/html" || content_type == "application/xhtml+xml") {
-        return NotHTML {
-            bad_mimetype: content_type.to_string(),
-        };
+        return NotHTML;
     }
 
     let (nr_forms, with) = {
@@ -94,7 +89,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         .to_string();
 
     if nr_forms == 0 {
-        return NoForms { url };
+        return NoForms;
     }
 
     if with.is_empty() {
@@ -169,6 +164,7 @@ pub async fn analyse_warc(
                 pipe.send(analysis_result).await.unwrap();
             });
         }
+        workers.spawn(async move { out_pipe.send(AnalysisResult::WarcDone).await.unwrap() });
         workers
     })
     .await?;
@@ -182,43 +178,9 @@ pub async fn analyse_warc(
 
 pub async fn prepare_db(db: &sqlx::Pool<sqlx::Sqlite>) {
     print!("Initialising database...");
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS urls
-                (id INTEGER PRIMARY KEY,
-                page_url TEXT,
-                from_archive_id INTEGER,
-                nr_forms_total INTEGER,
-                FOREIGN KEY(from_archive_id) REFERENCES archives(id))
-                ",
-    )
-    .execute(db)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS forms
-        (id INTEGER PRIMARY KEY,
-        form BLOB,
-        from_url INTEGER,
-        has_pattern INTEGER,
-        FOREIGN KEY(from_url) REFERENCES urls(id))",
-    )
-    .execute(db)
-    .await
-    .unwrap()
-    .last_insert_rowid();
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS archives
-                (id INTEGER PRIMARY KEY,
-                 record_url TEXT,
-                 nr_urls INTEGER,
-                 nr_forms INTEGER,
-                 nr_interesting_forms INTEGER)",
-    )
-    .execute(db)
-    .await
-    .unwrap();
-
+    sqlx::query(include_str!("sql/init-db.sql"))
+        .execute(db)
+        .await
+        .unwrap();
     println!("done.")
 }

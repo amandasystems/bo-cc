@@ -35,8 +35,9 @@ async fn manager(
                 nr_forms_w_pattern += with.len()
             }
             NoFormsWithPatterns { url: _, nr_forms } => nr_forms_seen += nr_forms,
-            NoForms { url: _ } => nr_no_forms += 1,
-            NotHTML { bad_mimetype: _ } | UnknownEncoding => (),
+            NoForms => nr_no_forms += 1,
+            NotHTML | UnknownEncoding => (),
+            WarcDone => {println!("Submitted an entire WARC!")},
         }
         // println!(
         //     "NO FORM: {}, FORMS: {}, FORMS WITH PATTERNS: {}",

@@ -11,14 +11,15 @@ reqwest = { version = "0.11" }
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
 sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
 tl = {version = "0.7.7"}
-encoding_rs = { version = "0.8.31", features = ["alloc"] }
+#encoding_rs = { version = "0.8.31", features = ["alloc"] }
 chardetng = "0.1.17"
 #tldextract = "0.6.0"
 #rayon = "1.5"
-futures = "0.3.25"
-regex = "1"
-lazy_static = "1.4.0"
-flate2 = "1.0"
+#futures = "0.3.25"
+#regex = "1"
+#lazy_static = "1.4.0"
+#flate2 = "1.0"
+flate2 = { version = "1.0", features = ["zlib-ng"], default-features = false }
 #warc_parser = "2.0.0"
 rust_warc = "1.1.0"
-async-compression = {version = "0.3.15", features= ["tokio", "gzip"]}
+#async-compression = {version = "0.3.15", features= ["tokio", "gzip"]}
