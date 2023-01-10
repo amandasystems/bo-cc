@@ -1,12 +1,13 @@
 use std::{
     borrow::Cow,
     fs::File,
-    io::{self, BufReader, ErrorKind},
+    io::{self, BufReader, ErrorKind, Read}, sync::Arc,
 };
 
 use chardetng::EncodingDetector;
 use flate2::read::MultiGzDecoder;
 use rust_warc::WarcReader;
+use sqlx::error::BoxDynError;
 use tokio::{sync::mpsc, task::JoinSet};
 
 #[derive(Debug)]
@@ -140,15 +141,15 @@ fn second_opinion(content: &[u8]) -> Result<(usize, Vec<String>), std::io::Error
 }
 
 pub async fn analyse_warc(
-    path: String,
+    url: String,
     out_pipe: mpsc::Sender<AnalysisResult>,
-) -> Result<(), io::Error> {
-    let f = File::open(path)?;
-
+    client: Arc<reqwest::blocking::Client>,
+) -> Result<(), BoxDynError> {
+    let gz = BufReader::new(client.get(url).send()?);
     let mut workers = tokio::task::spawn_blocking(move || {
         // This thread parses and filters the records
         let mut workers = JoinSet::new();
-        let decoder = MultiGzDecoder::new(f);
+        let decoder = MultiGzDecoder::new(gz);
         let reader = BufReader::new(decoder);
         let warc = WarcReader::new(reader);
 

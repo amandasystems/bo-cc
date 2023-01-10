@@ -7,7 +7,7 @@ edition = "2021"
 
 [dependencies]
 #warc = "0.3.1"
-reqwest = { version = "0.11" }
+reqwest = { version = "0.11", features = ["blocking"] }
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
 sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
 tl = {version = "0.7.7"}
