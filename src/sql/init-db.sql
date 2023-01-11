@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS forms
 
 CREATE TABLE IF NOT EXISTS archives
                 (id INTEGER PRIMARY KEY,
-                 record_url TEXT,
-                 nr_urls INTEGER,
-                 nr_forms INTEGER,
+                 record_url TEXT UNIQUE,
+                 nr_urls INTEGER DEFAULT 0,
+                 nr_forms INTEGER DEFAULT 0,
                  all_records_submitted_for_analysis INTEGER DEFAULT 0,
                  nr_interesting_forms INTEGER);

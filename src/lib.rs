@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
-    fs::File,
-    io::{self, BufReader, ErrorKind, Read}, sync::Arc,
+    io::{self, BufReader, ErrorKind},
+    sync::Arc,
 };
 
 use chardetng::EncodingDetector;
@@ -142,7 +142,8 @@ fn second_opinion(content: &[u8]) -> Result<(usize, Vec<String>), std::io::Error
 
 pub async fn analyse_warc(
     url: String,
-    out_pipe: mpsc::Sender<AnalysisResult>,
+    warc_id: i64,
+    out_pipe: mpsc::Sender<(i64, AnalysisResult)>,
     client: Arc<reqwest::blocking::Client>,
 ) -> Result<(), BoxDynError> {
     let gz = BufReader::new(client.get(url).send()?);
@@ -162,10 +163,15 @@ pub async fn analyse_warc(
                 let analysis_result = tokio::task::spawn_blocking(move || analyse_record(record))
                     .await
                     .unwrap();
-                pipe.send(analysis_result).await.unwrap();
+                pipe.send((warc_id, analysis_result)).await.unwrap();
             });
         }
-        workers.spawn(async move { out_pipe.send(AnalysisResult::WarcDone).await.unwrap() });
+        workers.spawn(async move {
+            out_pipe
+                .send((warc_id, AnalysisResult::WarcDone))
+                .await
+                .unwrap()
+        });
         workers
     })
     .await?;

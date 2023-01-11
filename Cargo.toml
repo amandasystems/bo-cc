@@ -15,7 +15,7 @@ tl = {version = "0.7.7"}
 chardetng = "0.1.17"
 #tldextract = "0.6.0"
 #rayon = "1.5"
-#futures = "0.3.25"
+futures = "0.3.25"
 #regex = "1"
 #lazy_static = "1.4.0"
 #flate2 = "1.0"
