@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS archives (
         record_url TEXT UNIQUE,
         nr_urls INTEGER DEFAULT 0,
         nr_forms INTEGER DEFAULT 0,
-        all_records_submitted_for_analysis INTEGER DEFAULT 0,
+        all_records_submitted_for_analysis INTEGER DEFAULT 0
 );
 
 DELETE FROM archives WHERE all_records_submitted_for_analysis = 0;
