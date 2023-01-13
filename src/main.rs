@@ -1,17 +1,79 @@
 use flate2::read::MultiGzDecoder;
+use futures::future::join_all;
 use reqwest::blocking::Client;
 use sqlx::error::BoxDynError;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
+use std::io;
 use std::io::prelude::*;
 use std::io::{BufReader, Read};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{env, io};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use bo_cc::{analyse_warc, prepare_db, AnalysisResult};
+const COMPRESSION_LEVEL: u32 = 6;
+
+async fn mark_done(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64) {
+    sqlx::query("UPDATE archives SET all_records_submitted_for_analysis = TRUE WHERE id = ?;")
+        .bind(warc_id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn increment_urls(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64) {
+    sqlx::query("UPDATE archives SET nr_urls = nr_urls + 1 WHERE id = ?;")
+        .bind(warc_id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn increment_urls_and_forms(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64, forms_by: u32) {
+    sqlx::query("UPDATE archives SET nr_urls = nr_urls + 1, nr_forms = nr_forms + ? WHERE id = ?;")
+        .bind(forms_by)
+        .bind(warc_id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
+async fn insert_forms(
+    db: &sqlx::Pool<sqlx::Sqlite>,
+    warc_id: i64,
+    url: String,
+    forms_with: Vec<String>,
+    nr_without: u32,
+) {
+    let nr_forms_total = u32::try_from(forms_with.len()).unwrap() + nr_without;
+    let url_id = sqlx::query(
+        "INSERT INTO urls(page_url, from_archive_id, nr_forms_total) VALUES (?, ?, ?);",
+    )
+    .bind(url)
+    .bind(warc_id)
+    .bind(nr_forms_total)
+    .execute(db)
+    .await
+    .unwrap()
+    .last_insert_rowid();
+
+    use xz2::bufread::XzEncoder;
+
+    let submit_all = forms_with.into_iter().map(|form| {
+        let compressed_form: Vec<u8> = XzEncoder::new(form.as_bytes(), COMPRESSION_LEVEL)
+            .bytes()
+            .map(|x| x.unwrap())
+            .collect();
+        sqlx::query("INSERT INTO forms(form, from_url, has_pattern) VALUES (?, ?, true)")
+            .bind(compressed_form)
+            .bind(url_id)
+            .execute(db)
+    });
+    join_all(submit_all).await;
+    //wait all!
+}
 
 async fn manager(
     mut rx: mpsc::Receiver<(i64, AnalysisResult)>,
@@ -22,16 +84,16 @@ async fn manager(
     while let Some((warc_id, analysis)) = rx.recv().await {
         match analysis {
             FormsWithPatterns {
-                url: _,
+                url,
                 with,
                 nr_without,
-            } => (),
-            NoFormsWithPatterns { url: _, nr_forms } => (),
-            NoForms => (),
-            NotHTML | UnknownEncoding => (),
-            WarcDone => {
-                println!("Submitted all of {}!", warc_id)
+            } => insert_forms(&db, warc_id, url, with, nr_without).await,
+            NoFormsWithPatterns { url: _, nr_forms } => {
+                increment_urls_and_forms(&db, warc_id, nr_forms).await
             }
+            NoForms | UnknownEncoding => increment_urls(&db, warc_id).await,
+            NotHTML => (),
+            WarcDone => mark_done(&db, warc_id).await,
         }
     }
 
@@ -54,7 +116,7 @@ async fn get_or_insert_warc(url: String, db: &sqlx::Pool<sqlx::Sqlite>) -> Optio
     }
 }
 
-fn get_warcs(client: &Client, db: &sqlx::Pool<sqlx::Sqlite>) -> Result<Vec<String>, BoxDynError> {
+fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
@@ -97,20 +159,15 @@ async fn main() -> Result<(), BoxDynError> {
 
     let client = reqwest::blocking::Client::new();
 
-    let urls = futures::future::join_all(
-        get_warcs(&client, &db)?
-            .into_iter()
-            .map(|url| get_or_insert_warc(url, &db)),
-    )
-    .await
-    .into_iter()
-    .flatten();
+    let urls = get_warcs(&client)?
+        .into_iter()
+        .map(|url| get_or_insert_warc(url, &db));
 
     let (tx_path, mut rx_path) = mpsc::channel::<(String, i64)>(10);
 
     let process_paths = tokio::spawn(async move {
         let mut analysis_tasks = JoinSet::new();
-        let client = Arc::new(client);
+        let client = Arc::new(client); // use clone!
         while let Some((path, id)) = rx_path.recv().await {
             println!("Analysing {}", &path);
             analysis_tasks.spawn(analyse_warc(
@@ -120,7 +177,7 @@ async fn main() -> Result<(), BoxDynError> {
                 Arc::clone(&client),
             ));
 
-            if analysis_tasks.len() > 5 {
+            if analysis_tasks.len() > 2 {
                 if let Err(e) = analysis_tasks.join_next().await.unwrap() {
                     println!("Task error: {}", e);
                 }
@@ -135,10 +192,12 @@ async fn main() -> Result<(), BoxDynError> {
         }
     });
 
-    let manager_future = tokio::spawn(manager(db_receive, db));
+    let manager_future = tokio::spawn(manager(db_receive, db.clone()));
 
-    for url_and_id in urls {
-        tx_path.send(url_and_id).await?;
+    for url_data in urls {
+        if let Some(url_and_id) = url_data.await {
+            tx_path.send(url_and_id).await?;
+        }
     }
 
     println!("All paths submitted!");

@@ -18,12 +18,12 @@ pub enum AnalysisResult {
     NoForms,
     NoFormsWithPatterns {
         url: String,
-        nr_forms: usize,
+        nr_forms: u32,
     },
     FormsWithPatterns {
         url: String,
         with: Vec<String>,
-        nr_without: usize,
+        nr_without: u32,
     },
 }
 
@@ -97,14 +97,16 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         return NoFormsWithPatterns { url, nr_forms };
     }
 
+    let nr_with: u32 = with.len().try_into().unwrap();
+
     FormsWithPatterns {
         url,
-        nr_without: nr_forms - with.len(),
+        nr_without: nr_forms - nr_with,
         with,
     }
 }
 
-fn second_opinion(content: &[u8]) -> Result<(usize, Vec<String>), std::io::Error> {
+fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), std::io::Error> {
     let body = decode_body(content)?;
     let dom = tl::parse(&body, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
