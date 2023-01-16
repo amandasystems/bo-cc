@@ -32,6 +32,7 @@ pub enum AnalysisResult {
 fn get_encoding_by_header(headers: [Header; 64]) -> Option<&'static Encoding> {
     headers
         .into_iter()
+        .take_while(|h| h != &httparse::EMPTY_HEADER)
         .find(|h| h.name == "Content-type")
         .map(|h| String::from_utf8_lossy(h.value))
         .and_then(|content_type| {
