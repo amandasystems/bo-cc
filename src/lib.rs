@@ -5,6 +5,7 @@ use std::{
 };
 
 use chardetng::EncodingDetector;
+use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
 use rust_warc::WarcReader;
 use sqlx::error::BoxDynError;
@@ -17,7 +18,6 @@ pub enum AnalysisResult {
     NotHTML,
     NoForms,
     NoFormsWithPatterns {
-        url: String,
         nr_forms: u32,
     },
     FormsWithPatterns {
@@ -27,21 +27,50 @@ pub enum AnalysisResult {
     },
 }
 
+fn get_encoding_by_header(body: &[u8]) -> Option<&'static Encoding> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Response::new(&mut headers);
+
+    let parse_result = req.parse(body);
+
+    parse_result
+        .ok()
+        .and_then(|_| headers.into_iter().find(|h| h.name == "Content-type"))
+        .map(|h| String::from_utf8_lossy(h.value))
+        .and_then(|content_type| {
+            let mut iter = content_type.split("; charset=");
+            iter.next(); // Skip first half
+            iter.next().map(|s| s.to_owned())
+        })
+        .and_then(|content_type| Encoding::for_label(content_type.as_bytes()))
+}
+
 fn decode_body(body: &[u8]) -> Result<Cow<str>, io::Error> {
-    let mut detector = EncodingDetector::new();
-    const DETECTOR_CHUNK_SIZE_BYTES: usize = 1024;
+    let header_encoding = get_encoding_by_header(body);
+    let body = body
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .map(|lf_start| &body[lf_start + 2..])
+        .ok_or(io::Error::new(
+            ErrorKind::Other,
+            format!("Error getting the body of the HTTP request"),
+        ))?;
 
-    // FIXME this may split in the middle of a character which is bad maybe
-    // We should also maybe feed smaller cunks one at a time until we successfully detect the encoding.
-    let (subslice, is_last) = if body.len() > DETECTOR_CHUNK_SIZE_BYTES {
-        (&body[..DETECTOR_CHUNK_SIZE_BYTES], false)
-    } else {
-        (body, true)
-    };
+    let document_encoding = header_encoding.unwrap_or_else(|| {
+        let mut detector = EncodingDetector::new();
+        const DETECTOR_CHUNK_SIZE_BYTES: usize = 1024;
 
-    detector.feed(subslice, is_last);
+        // FIXME this may split in the middle of a character which is bad maybe
+        // We should also maybe feed smaller cunks one at a time until we successfully detect the encoding.
+        let (subslice, is_last) = if body.len() > DETECTOR_CHUNK_SIZE_BYTES {
+            (&body[..DETECTOR_CHUNK_SIZE_BYTES], false)
+        } else {
+            (body, true)
+        };
 
-    let document_encoding = detector.guess(None, true);
+        detector.feed(subslice, is_last);
+        detector.guess(None, true)
+    });
 
     let (cow, decoder_used, had_errors) = document_encoding.decode(body);
     if had_errors {
@@ -56,12 +85,6 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, io::Error> {
         Ok(cow)
     }
 }
-
-// fn extract_tld(record: &Record<BufferedBody>) -> Option<TldResult> {
-//     let extractor = TldExtractor::new(TldOption::default());
-//     let record_uri = record.header(WarcHeader::TargetURI).unwrap();
-//     extractor.extract(&record_uri).ok()
-// }
 
 fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
     use crate::AnalysisResult::*;
@@ -83,21 +106,20 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         }
     };
 
-    let url = record
-        .header
-        .get(&"warc-target-uri".into())
-        .unwrap()
-        .to_string();
-
     if nr_forms == 0 {
         return NoForms;
     }
 
     if with.is_empty() {
-        return NoFormsWithPatterns { url, nr_forms };
+        return NoFormsWithPatterns { nr_forms };
     }
 
     let nr_with: u32 = with.len().try_into().unwrap();
+    let url = record
+        .header
+        .get(&"warc-target-uri".into())
+        .unwrap()
+        .to_string();
 
     FormsWithPatterns {
         url,

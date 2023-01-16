@@ -60,8 +60,10 @@ name = "bo-cc"
 version = "0.1.0"
 dependencies = [
  "chardetng",
+ "encoding_rs",
  "flate2",
  "futures 0.3.25",
+ "httparse",
  "reqwest",
  "rust_warc",
  "sqlx",

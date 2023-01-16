@@ -31,6 +31,14 @@ async fn increment_urls(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64) {
         .unwrap();
 }
 
+async fn increment_unknown_encoding(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64) {
+    sqlx::query(include_str!("sql/increment-unknown-encoding.sql"))
+        .bind(warc_id)
+        .execute(db)
+        .await
+        .unwrap();
+}
+
 async fn increment_urls_and_forms(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64, forms_by: u32) {
     sqlx::query("UPDATE archives SET nr_urls = nr_urls + 1, nr_forms = nr_forms + ? WHERE id = ?;")
         .bind(forms_by)
@@ -66,13 +74,12 @@ async fn insert_forms(
             .bytes()
             .map(|x| x.unwrap())
             .collect();
-        sqlx::query("INSERT INTO forms(form, from_url, has_pattern) VALUES (?, ?, true)")
+        sqlx::query("INSERT INTO forms(form, from_url) VALUES (?, ?)")
             .bind(compressed_form)
             .bind(url_id)
             .execute(db)
     });
     join_all(submit_all).await;
-    //wait all!
 }
 
 async fn manager(
@@ -88,10 +95,13 @@ async fn manager(
                 with,
                 nr_without,
             } => insert_forms(&db, warc_id, url, with, nr_without).await,
-            NoFormsWithPatterns { url: _, nr_forms } => {
+            NoFormsWithPatterns { nr_forms } => {
                 increment_urls_and_forms(&db, warc_id, nr_forms).await
             }
-            NoForms | UnknownEncoding => increment_urls(&db, warc_id).await,
+            NoForms => increment_urls(&db, warc_id).await,
+            UnknownEncoding => {
+                increment_unknown_encoding(&db, warc_id).await;
+            }
             NotHTML => (),
             WarcDone => mark_done(&db, warc_id).await,
         }
@@ -104,6 +114,7 @@ async fn manager(
 
 async fn get_or_insert_warc(url: String, db: &sqlx::Pool<sqlx::Sqlite>) -> Option<(String, i64)> {
     let (id, done) = sqlx::query_as(include_str!("sql/get-or-update-warc.sql"))
+        .bind(&url)
         .bind(&url)
         .fetch_one(db)
         .await
