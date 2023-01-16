@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    error::Error,
     io::{self, BufReader, ErrorKind},
     sync::Arc,
 };
@@ -7,6 +8,7 @@ use std::{
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
+use httparse::Header;
 use rust_warc::WarcReader;
 use sqlx::error::BoxDynError;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -27,15 +29,10 @@ pub enum AnalysisResult {
     },
 }
 
-fn get_encoding_by_header(body: &[u8]) -> Option<&'static Encoding> {
-    let mut headers = [httparse::EMPTY_HEADER; 64];
-    let mut req = httparse::Response::new(&mut headers);
-
-    let parse_result = req.parse(body);
-
-    parse_result
-        .ok()
-        .and_then(|_| headers.into_iter().find(|h| h.name == "Content-type"))
+fn get_encoding_by_header(headers: [Header; 64]) -> Option<&'static Encoding> {
+    headers
+        .into_iter()
+        .find(|h| h.name == "Content-type")
         .map(|h| String::from_utf8_lossy(h.value))
         .and_then(|content_type| {
             let mut iter = content_type.split("; charset=");
@@ -45,18 +42,17 @@ fn get_encoding_by_header(body: &[u8]) -> Option<&'static Encoding> {
         .and_then(|content_type| Encoding::for_label(content_type.as_bytes()))
 }
 
-fn decode_body(body: &[u8]) -> Result<Cow<str>, io::Error> {
-    let header_encoding = get_encoding_by_header(body);
-    let body = body
-        .windows(2)
-        .position(|window| window == b"\r\n")
-        .map(|lf_start| &body[lf_start + 2..])
-        .ok_or(io::Error::new(
-            ErrorKind::Other,
-            format!("Error getting the body of the HTTP request"),
-        ))?;
+fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut response = httparse::Response::new(&mut headers);
 
-    let document_encoding = header_encoding.unwrap_or_else(|| {
+    let body = if let httparse::Status::Complete(body_offset) = response.parse(body)? {
+        &body[body_offset..]
+    } else {
+        body // Fall back to using the entire response: this is wrong, but probably OK
+    };
+
+    let document_encoding = get_encoding_by_header(headers).unwrap_or_else(|| {
         let mut detector = EncodingDetector::new();
         const DETECTOR_CHUNK_SIZE_BYTES: usize = 1024;
 
@@ -74,13 +70,13 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, io::Error> {
 
     let (cow, decoder_used, had_errors) = document_encoding.decode(body);
     if had_errors {
-        Err(io::Error::new(
+        Err(Box::new(io::Error::new(
             ErrorKind::Other,
             format!(
                 "Error decoding body with detected encoding {}",
                 decoder_used.name()
             ),
-        ))
+        )))
     } else {
         Ok(cow)
     }
@@ -128,7 +124,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
     }
 }
 
-fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), std::io::Error> {
+fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), Box<dyn Error>> {
     let body = decode_body(content)?;
     let dom = tl::parse(&body, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
