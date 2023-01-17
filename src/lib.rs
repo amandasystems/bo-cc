@@ -153,9 +153,13 @@ fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), Box<dyn Error>> 
                         || attributes.contains("ng-pattern"))
             })
         {
-            if let Some(form_sourcecode) = form.raw().try_as_utf8_str().map(|s| s.to_string()) {
-                interesting_forms.push(form_sourcecode)
+            let (start, end) = form.boundaries(&parser);
+            let tag_text = body[start..=end].to_owned();
+            if !tag_text.contains("</form>") {
+                // For some reason, we sometimes only get the opening tag.
+                return Err("No closing tag in form: assuming broken HTML".into());
             }
+            interesting_forms.push(tag_text);
         }
     }
     Ok((nr_forms, interesting_forms))

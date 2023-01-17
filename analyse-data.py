@@ -62,7 +62,7 @@ def main():
             count_forms(cur)
         elif mode == "with-validation":
             for form in forms_with_validation(cur):
-                print(form.replace("\n", ""))
+                print(form.replace("\n", "").replace("\r", ""))
 
 if __name__ == "__main__":
     main()
