@@ -188,21 +188,20 @@ pub async fn analyse_warc(
                 let analysis_result = tokio::task::spawn_blocking(move || analyse_record(record))
                     .await
                     .unwrap();
-                pipe.send((warc_id, analysis_result)).await.unwrap();
+                pipe.send((warc_id, analysis_result)).await
             });
         }
         workers.spawn(async move {
             out_pipe
                 .send((warc_id, AnalysisResult::WarcDone))
                 .await
-                .unwrap()
         });
         workers
     })
     .await?;
 
     while let Some(r) = workers.join_next().await {
-        r? // Terminate if one of the subtasks failed
+        r?? // Terminate if one of the subtasks failed
     }
 
     Ok(())
