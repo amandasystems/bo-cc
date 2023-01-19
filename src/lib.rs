@@ -12,6 +12,8 @@ use httparse::Header;
 use rust_warc::WarcReader;
 use sqlx::error::BoxDynError;
 use tokio::{sync::mpsc, task::JoinSet};
+use log::{trace, warn};
+
 
 #[derive(Debug)]
 pub enum AnalysisResult {
@@ -50,6 +52,7 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
     let body = if let httparse::Status::Complete(body_offset) = response.parse(body)? {
         &body[body_offset..]
     } else {
+        warn!("Unable to parse headers, using entire request as body!");
         body // Fall back to using the entire response: this is wrong, but probably OK
     };
 
@@ -92,6 +95,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         .unwrap();
 
     if !(content_type == "text/html" || content_type == "application/xhtml+xml") {
+        trace!("Ignoring unknown content type: {}", content_type);
         return NotHTML;
     }
 

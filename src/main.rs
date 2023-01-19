@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+use log::{info, trace, warn};
+
 
 use bo_cc::{analyse_warc, prepare_db, AnalysisResult};
 const COMPRESSION_LEVEL: u32 = 6;
@@ -107,7 +109,7 @@ async fn manager(
         }
     }
 
-    println!("All channels closed!");
+    info!("All channels closed!");
 
     Ok(())
 }
@@ -144,6 +146,7 @@ fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
 
 #[tokio::main]
 async fn main() -> Result<(), BoxDynError> {
+    env_logger::init();
     let (db_submit, db_receive) = mpsc::channel(32);
 
     let sqlite_options = SqliteConnectOptions::from_str("sqlite://form_validation.db")
@@ -151,7 +154,7 @@ async fn main() -> Result<(), BoxDynError> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::MAX);
+        .busy_timeout(Duration::from_secs(1200));
 
     let db = SqlitePoolOptions::new()
         .max_connections(5)
@@ -180,7 +183,7 @@ async fn main() -> Result<(), BoxDynError> {
         let mut analysis_tasks = JoinSet::new();
         let client = Arc::new(client); // use clone!
         while let Some((path, id)) = rx_path.recv().await {
-            println!("Analysing {}", &path);
+            info!("Analysing {}", &path);
             analysis_tasks.spawn(analyse_warc(
                 path,
                 id,
@@ -189,8 +192,9 @@ async fn main() -> Result<(), BoxDynError> {
             ));
 
             if analysis_tasks.len() > 2 {
+                trace!("Waiting for a task to finish...");
                 if let Err(e) = analysis_tasks.join_next().await.unwrap() {
-                    println!("Task error: {}", e);
+                    warn!("Task error: {}", e);
                 }
             }
         }
@@ -198,7 +202,7 @@ async fn main() -> Result<(), BoxDynError> {
         // Drain the queue
         while let Some(outcome) = analysis_tasks.join_next().await {
             if let Err(e) = outcome {
-                println!("Task error: {}", e);
+                warn!("Task error: {}", e);
             }
         }
     });
@@ -211,7 +215,7 @@ async fn main() -> Result<(), BoxDynError> {
         }
     }
 
-    println!("All paths submitted!");
+    info!("All paths submitted!");
 
     drop(tx_path);
 
