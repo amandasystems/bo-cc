@@ -151,7 +151,7 @@ async fn main() -> Result<(), BoxDynError> {
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(30));
+        .busy_timeout(Duration::MAX);
 
     let db = SqlitePoolOptions::new()
         .max_connections(5)
