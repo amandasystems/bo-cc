@@ -18,6 +18,7 @@ use bo_cc::{analyse_warc, prepare_db, AnalysisResult};
 const COMPRESSION_LEVEL: u32 = 6;
 
 async fn mark_done(db: &sqlx::Pool<sqlx::Sqlite>, warc_id: i64) {
+    info!("Done with WARC ID {}", warc_id);
     sqlx::query("UPDATE archives SET all_records_submitted_for_analysis = TRUE WHERE id = ?;")
         .bind(warc_id)
         .execute(db)

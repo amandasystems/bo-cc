@@ -12,7 +12,7 @@ use httparse::Header;
 use rust_warc::WarcReader;
 use sqlx::error::BoxDynError;
 use tokio::{sync::mpsc, task::JoinSet};
-use log::{trace, warn};
+use log::{trace, warn, info};
 
 
 #[derive(Debug)]
@@ -212,10 +212,10 @@ pub async fn analyse_warc(
 }
 
 pub async fn prepare_db(db: &sqlx::Pool<sqlx::Sqlite>) {
-    print!("Initialising database...");
+    info!("Initialising database...");
     sqlx::query(include_str!("sql/init-db.sql"))
         .execute(db)
         .await
         .unwrap();
-    println!("done.")
+        info!("Done initialising database!");
 }
