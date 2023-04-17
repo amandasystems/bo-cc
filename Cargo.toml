@@ -9,7 +9,7 @@ edition = "2021"
 #warc = "0.3.1"
 reqwest = { version = "0.11", features = ["blocking"] }
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
-sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
+sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "postgres"] }
 tl = {version = "0.7.7"}
 chardetng = "0.1.17"
 #tldextract = "0.6.0"

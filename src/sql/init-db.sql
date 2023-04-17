@@ -1,5 +1,14 @@
+CREATE TABLE IF NOT EXISTS archives (
+        id SERIAL PRIMARY KEY,
+        record_url TEXT UNIQUE,
+        nr_urls INTEGER DEFAULT 0,
+        nr_forms INTEGER DEFAULT 0,
+        nr_unknown_encoding INTEGER DEFAULT 0,
+        all_records_submitted_for_analysis BOOL DEFAULT false
+);
+
 CREATE TABLE IF NOT EXISTS urls (
-        id INTEGER PRIMARY KEY,
+        id SERIAL PRIMARY KEY,
         page_url TEXT UNIQUE,
         from_archive_id INTEGER,
         nr_forms_total INTEGER,
@@ -7,19 +16,10 @@ CREATE TABLE IF NOT EXISTS urls (
 );
 
 CREATE TABLE IF NOT EXISTS forms (
-        id INTEGER PRIMARY KEY,
-        form BLOB,
+        id SERIAL PRIMARY KEY,
+        form BYTEA,
         from_url INTEGER,
         FOREIGN KEY(from_url) REFERENCES urls(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS archives (
-        id INTEGER PRIMARY KEY,
-        record_url TEXT UNIQUE,
-        nr_urls INTEGER DEFAULT 0,
-        nr_forms INTEGER DEFAULT 0,
-        nr_unknown_encoding INTEGER DEFAULT 0,
-        all_records_submitted_for_analysis INTEGER DEFAULT 0
 );
 
 DELETE FROM archives WHERE all_records_submitted_for_analysis = false;

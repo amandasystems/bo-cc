@@ -2,18 +2,17 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
-    sync::Arc,
 };
 
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
 use httparse::Header;
+use log::{info, trace, warn};
 use rust_warc::WarcReader;
 use sqlx::error::BoxDynError;
+use sqlx::Executor;
 use tokio::{sync::mpsc, task::JoinSet};
-use log::{trace, warn, info};
-
 
 #[derive(Debug)]
 pub enum AnalysisResult {
@@ -173,7 +172,7 @@ pub async fn analyse_warc(
     url: String,
     warc_id: i64,
     out_pipe: mpsc::Sender<(i64, AnalysisResult)>,
-    client: Arc<reqwest::blocking::Client>,
+    client: reqwest::blocking::Client,
 ) -> Result<(), BoxDynError> {
     let gz = BufReader::new(client.get(url).send()?);
     let mut workers = tokio::task::spawn_blocking(move || {
@@ -195,11 +194,7 @@ pub async fn analyse_warc(
                 pipe.send((warc_id, analysis_result)).await
             });
         }
-        workers.spawn(async move {
-            out_pipe
-                .send((warc_id, AnalysisResult::WarcDone))
-                .await
-        });
+        workers.spawn(async move { out_pipe.send((warc_id, AnalysisResult::WarcDone)).await });
         workers
     })
     .await?;
@@ -211,11 +206,8 @@ pub async fn analyse_warc(
     Ok(())
 }
 
-pub async fn prepare_db(db: &sqlx::Pool<sqlx::Sqlite>) {
+pub async fn prepare_db(db: &sqlx::Pool<sqlx::Postgres>) {
     info!("Initialising database...");
-    sqlx::query(include_str!("sql/init-db.sql"))
-        .execute(db)
-        .await
-        .unwrap();
-        info!("Done initialising database!");
+    db.execute(include_str!("sql/init-db.sql")).await.unwrap();
+    info!("Done initialising database!");
 }
