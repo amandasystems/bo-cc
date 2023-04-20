@@ -295,7 +295,7 @@ pub async fn get_records(
     tx: mpsc::Sender<WarcRecord>,
 ) -> Result<(), BoxDynError> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
-        client.get(&warc_url).send()?,
+        client.get(&warc_url).send()?.error_for_status()?,
     ))));
 
     for record in warc_reader

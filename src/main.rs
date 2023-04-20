@@ -26,7 +26,8 @@ fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
     let gz = BufReader::new(
         client
             .get(" https://data.commoncrawl.org/crawl-data/CC-MAIN-2022-49/warc.paths.gz")
-            .send()?,
+            .send()?
+            .error_for_status()?,
     );
 
     Ok(BufReader::new(MultiGzDecoder::new(gz))
