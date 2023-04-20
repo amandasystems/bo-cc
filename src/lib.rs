@@ -101,7 +101,6 @@ impl ArchiveSummary {
     }
 
     pub async fn write_out(&self, db: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), BoxDynError> {
-        let mut transaction = db.begin().await?;
         let nr_forms_with_pattern: i64 = self
             .urls_with_pattern_forms
             .iter()
@@ -114,11 +113,17 @@ impl ArchiveSummary {
         .bind(self.nr_urls_without_patterns + self.urls_with_pattern_forms.len() as i64)
         .bind(self.nr_unknown_encoding)
         .bind(self.nr_forms_without_patterns + nr_forms_with_pattern)
-        .execute(&mut transaction)
+        .execute(db)
         .await?
         .last_insert_rowid();
 
         let mut url_jobs = Vec::with_capacity(self.urls_with_pattern_forms.len());
+
+        info!(
+            "Found {} forms with patterns in WARC {}",
+            self.urls_with_pattern_forms.len(),
+            &self.archive_url
+        );
 
         for summary in self.urls_with_pattern_forms.iter() {
             url_jobs.push(summary.write_out(warc_id, db));
@@ -127,7 +132,6 @@ impl ArchiveSummary {
         for j in join_all(url_jobs).await {
             j?;
         }
-        transaction.commit().await?;
         Ok(())
     }
 }
