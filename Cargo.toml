@@ -3,27 +3,27 @@ name = "bo-cc"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-#warc = "0.3.1"
 reqwest = { version = "0.11", features = ["blocking"] }
 tokio = { version = "1", features = ["full", "rt-multi-thread"] }
 sqlx = { version = "0.6", features = ["runtime-tokio-rustls", "sqlite"] }
 tl = {version = "0.7.7"}
 chardetng = "0.1.17"
-#tldextract = "0.6.0"
-#rayon = "1.5"
 futures = "0.3.25"
-#regex = "1"
-#lazy_static = "1.4.0"
-#flate2 = "1.0"
 flate2 = { version = "1.0", features = ["zlib-ng"], default-features = false }
-#warc_parser = "2.0.0"
 rust_warc = "1.1.0"
-#async-compression = {version = "0.3.15", features= ["tokio", "gzip"]}
 xz2 = {version = "0.1.7", features = ["tokio"]}
 httparse = "1.8.0"
 encoding_rs = "0.8.31"
 log = "0.4"
 env_logger = "0.9.0"
+#rayon = "1.7"
+#tokio-rayon = "2.1.0"
+#async-trait = "0.1.68"
+
+
+
+[profile.release]
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations
+# panic = 'abort'   # Abort on panic

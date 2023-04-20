@@ -9,17 +9,15 @@ RO_SQLITE_URI  = f"file:{OUTPUT_DB_FILE}?mode=ro"
 def count_forms(cur):
     cur.execute(
         """
-    SELECT COUNT(DISTINCT record_url), sum(nr_forms) FROM archives 
-    WHERE all_records_submitted_for_analysis = true
+    SELECT COUNT(DISTINCT record_url), sum(nr_forms) FROM archives
     """
     )
     nr_records, nr_forms = cur.fetchone()
 
     cur.execute("""
-            SELECT count(forms.id) as nr_forms_with_patterns FROM forms 
-            JOIN urls ON urls.id = forms.from_url 
-            JOIN archives ON urls.from_archive_id = archives.id 
-            WHERE all_records_submitted_for_analysis = true;
+            SELECT count(forms.id) as nr_forms_with_patterns FROM forms
+            JOIN urls ON urls.id = forms.from_url
+            JOIN archives ON urls.from_archive_id = archives.id;
             """)
     (nr_interesting, ) =  cur.fetchone()
     print(
@@ -29,11 +27,7 @@ def count_forms(cur):
         f"{nr_interesting:n} forms with validation ({nr_interesting/nr_forms*100:.2n} %)."
     )
 
-    cur.execute(
-        """
-        SELECT sum(nr_urls) from archives WHERE all_records_submitted_for_analysis = true
-        """
-    )
+    cur.execute("SELECT sum(nr_urls) from archives")
     (nr_urls,) = cur.fetchone()
     print(f"Saw {nr_urls} urls: {nr_forms/nr_urls:.2n} form(s)/URL.")
 

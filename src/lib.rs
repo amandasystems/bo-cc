@@ -2,32 +2,148 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
-    sync::Arc,
 };
+const COMPRESSION_LEVEL: u32 = 6;
 
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
+use futures::future::join_all;
 use httparse::Header;
-use rust_warc::WarcReader;
+use log::{info, trace, warn};
+use rust_warc::{WarcReader, WarcRecord};
 use sqlx::error::BoxDynError;
 use tokio::{sync::mpsc, task::JoinSet};
-use log::{trace, warn, info};
 
+#[derive(Debug)]
+pub struct URLSummary {
+    url: String,
+    with_patterns: Vec<String>,
+}
+
+impl URLSummary {
+    async fn write_out(
+        &self,
+        warc_id: i64,
+        db: &sqlx::Pool<sqlx::Sqlite>,
+    ) -> Result<(), BoxDynError> {
+        let url_id = sqlx::query("INSERT INTO urls(page_url, from_archive_id) VALUES (?, ?);")
+            .bind(&self.url)
+            .bind(warc_id)
+            .execute(db)
+            .await?
+            .last_insert_rowid();
+
+        use std::io::prelude::*;
+        use xz2::bufread::XzEncoder;
+
+        let submit_all = self.with_patterns.iter().map(|form| {
+            let compressed_form: Vec<u8> = XzEncoder::new(form.as_bytes(), COMPRESSION_LEVEL)
+                .bytes()
+                .map(|x| x.unwrap())
+                .collect();
+            sqlx::query("INSERT INTO forms(form, from_url) VALUES (?, ?)")
+                .bind(compressed_form)
+                .bind(url_id)
+                .execute(db)
+        });
+
+        for r in join_all(submit_all).await {
+            r?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct ArchiveSummary {
+    archive_url: String,
+    nr_unknown_encoding: i64,
+    nr_urls_without_patterns: i64,
+    nr_forms_without_patterns: i64,
+    urls_with_pattern_forms: Vec<URLSummary>,
+}
+
+impl ArchiveSummary {
+    fn new(archive_url: String) -> ArchiveSummary {
+        ArchiveSummary {
+            archive_url,
+            nr_unknown_encoding: 0,
+            nr_urls_without_patterns: 0,
+            nr_forms_without_patterns: 0,
+            urls_with_pattern_forms: Vec::with_capacity(1024),
+        }
+    }
+
+    fn add_result(&mut self, result: AnalysisResult) {
+        use AnalysisResult::*;
+        match result {
+            NotHTML => (),
+            UnknownEncoding => self.nr_unknown_encoding += 1,
+            NoForms => self.nr_urls_without_patterns += 1,
+            FormsWithPatterns {
+                url,
+                with,
+                nr_without,
+            } => {
+                self.nr_forms_without_patterns += nr_without;
+                self.urls_with_pattern_forms.push(URLSummary {
+                    url,
+                    with_patterns: with,
+                })
+            }
+            NoFormsWithPatterns { nr_forms } => {
+                self.nr_urls_without_patterns += 1;
+                self.nr_forms_without_patterns += nr_forms;
+            }
+        }
+    }
+
+    pub async fn write_out(&self, db: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), BoxDynError> {
+        let mut transaction = db.begin().await?;
+        let nr_forms_with_pattern: i64 = self
+            .urls_with_pattern_forms
+            .iter()
+            .map(|u| u.with_patterns.len() as i64)
+            .sum();
+        let warc_id = sqlx::query(
+            "INSERT INTO archives(record_url, nr_urls, nr_unknown_encoding, nr_forms) VALUES(?, ?, ?, ?)",
+        )
+        .bind(&self.archive_url)
+        .bind(self.nr_urls_without_patterns + self.urls_with_pattern_forms.len() as i64)
+        .bind(self.nr_unknown_encoding)
+        .bind(self.nr_forms_without_patterns + nr_forms_with_pattern)
+        .execute(&mut transaction)
+        .await?
+        .last_insert_rowid();
+
+        let mut url_jobs = Vec::with_capacity(self.urls_with_pattern_forms.len());
+
+        for summary in self.urls_with_pattern_forms.iter() {
+            url_jobs.push(summary.write_out(warc_id, db));
+        }
+
+        for j in join_all(url_jobs).await {
+            j?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub enum AnalysisResult {
-    WarcDone,
     UnknownEncoding,
     NotHTML,
     NoForms,
     NoFormsWithPatterns {
-        nr_forms: u32,
+        nr_forms: i64,
     },
     FormsWithPatterns {
         url: String,
         with: Vec<String>,
-        nr_without: u32,
+        nr_without: i64,
     },
 }
 
@@ -115,7 +231,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
         return NoFormsWithPatterns { nr_forms };
     }
 
-    let nr_with: u32 = with.len().try_into().unwrap();
+    let nr_with = with.len() as i64;
     let url = record
         .header
         .get(&"warc-target-uri".into())
@@ -129,7 +245,7 @@ fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
     }
 }
 
-fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), Box<dyn Error>> {
+fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
     let body = decode_body(content)?;
     let dom = tl::parse(&body, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
@@ -157,7 +273,7 @@ fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), Box<dyn Error>> 
                         || attributes.contains("ng-pattern"))
             })
         {
-            let (start, end) = form.boundaries(&parser);
+            let (start, end) = form.boundaries(parser);
             let tag_text = body[start..=end].to_owned();
             if !tag_text.contains("</form>") {
                 // For some reason, we sometimes only get the opening tag.
@@ -169,44 +285,54 @@ fn second_opinion(content: &[u8]) -> Result<(u32, Vec<String>), Box<dyn Error>> 
     Ok((nr_forms, interesting_forms))
 }
 
-pub async fn analyse_warc(
-    url: String,
-    warc_id: i64,
-    out_pipe: mpsc::Sender<(i64, AnalysisResult)>,
-    client: Arc<reqwest::blocking::Client>,
+pub async fn get_records(
+    warc_url: String,
+    client: reqwest::blocking::Client,
+    tx: mpsc::Sender<WarcRecord>,
 ) -> Result<(), BoxDynError> {
-    let gz = BufReader::new(client.get(url).send()?);
-    let mut workers = tokio::task::spawn_blocking(move || {
-        // This thread parses and filters the records
-        let mut workers = JoinSet::new();
-        let decoder = MultiGzDecoder::new(gz);
-        let reader = BufReader::new(decoder);
-        let warc = WarcReader::new(reader);
+    let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
+        client.get(&warc_url).send()?,
+    ))));
 
-        for record in warc
-            .filter_map(|r| r.ok())
-            .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into()))
-        {
-            let pipe = out_pipe.clone();
-            workers.spawn(async move {
-                let analysis_result = tokio::task::spawn_blocking(move || analyse_record(record))
-                    .await
-                    .unwrap();
-                pipe.send((warc_id, analysis_result)).await
-            });
-        }
-        workers.spawn(async move {
-            out_pipe
-                .send((warc_id, AnalysisResult::WarcDone))
-                .await
-        });
-        workers
-    })
-    .await?;
-
-    while let Some(r) = workers.join_next().await {
-        r?? // Terminate if one of the subtasks failed
+    for record in warc_reader
+        .filter_map(|r| r.ok())
+        .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into()))
+    {
+        tx.send(record)
+            .await
+            .map_err(|e| format!("Error sending WARC {} for analysis: {}", e, warc_url))?;
     }
+    Ok(())
+}
+
+pub async fn process_warc(
+    url: String,
+    client: reqwest::blocking::Client,
+    db: sqlx::Pool<sqlx::Sqlite>,
+) -> Result<(), BoxDynError> {
+    let (tx_records, mut rx_records) = mpsc::channel::<WarcRecord>(10);
+    // FIXME use lifetimes to get rid of this clone!
+    let parse_warc = tokio::task::spawn(get_records(url.clone(), client, tx_records));
+    let mut workers = JoinSet::new();
+
+    while let Some(record) = rx_records.recv().await {
+        workers.spawn(
+            async move { tokio::task::spawn_blocking(move || analyse_record(record)).await },
+        );
+    }
+
+    // FIXME this is not worth it for the logging!
+    let mut summary = ArchiveSummary::new(url.clone());
+    while let Some(r) = workers.join_next().await {
+        /* If something went wrong with the pipes,
+        the whole system is unsound and we cannot trust the result! */
+        summary.add_result(r??);
+    }
+
+    info!("Done with WARC ID {}", &url);
+
+    parse_warc.await??;
+    summary.write_out(&db).await?;
 
     Ok(())
 }
@@ -217,5 +343,5 @@ pub async fn prepare_db(db: &sqlx::Pool<sqlx::Sqlite>) {
         .execute(db)
         .await
         .unwrap();
-        info!("Done initialising database!");
+    info!("Done initialising database!");
 }
