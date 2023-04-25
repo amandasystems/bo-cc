@@ -338,16 +338,20 @@ pub async fn process_warc(
         );
     }
 
-    let mut summary = ArchiveSummary::new(url.clone());
+    let mut summary: Option<ArchiveSummary> = None;
     while let Some(r) = workers.join_next().await {
-        /* If something went wrong with the pipes,
-        the whole system is unsound and we cannot trust the result! */
-        summary.add_result(r??);
+        let r = ArchiveSummary::new(url.clone(), r??);
+
+        if let Some(inner) = summary {
+            summary = Some(inner.merge(r));
+        } else {
+            summary = Some(r);
+        }
     }
     parse_warc.await??;
     info!("Done with WARC ID {}", &url);
 
-    outbox.send(summary).await?;
+    outbox.send(summary.unwrap()).await?;
 
     Ok(())
 }
