@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
     error::Error,
     io::{self, BufReader, ErrorKind},
     sync::mpsc::Receiver,
@@ -22,7 +21,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 
 const WRITE_BACKLOG: usize = 32;
 
-pub fn processed_warcs() -> HashSet<String> {
+pub fn processed_warcs() -> Vec<String> {
     BufReader::new(fs::File::open("forms.d/index").expect("No index file!"))
         .lines()
         .flatten()
@@ -38,9 +37,13 @@ impl AnalysisWriter {
     fn process_inbox(incoming: Receiver<ArchiveSummary>) {
         info!("Writer thread started!");
         fs::create_dir_all("forms.d").expect("Unable to create forms.d directory!");
-        let mut nr_seen = 0;
+        let seen = processed_warcs();
+        let mut nr_seen = seen.len();
         let mut index_bw =
             BufWriter::new(fs::File::create("forms.d/index").expect("Unable to open index file"));
+        for s in seen.into_iter() {
+            writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
+        }
         // FIXME do compression too!
         while let Ok(summary) = incoming.recv() {
             let archive_fn = format!("forms.d/{}.cbor", nr_seen);
