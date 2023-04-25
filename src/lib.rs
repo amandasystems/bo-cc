@@ -141,7 +141,7 @@ impl ArchiveSummary {
         }
     }
 
-    fn merge(mut self, other: ArchiveSummary) -> ArchiveSummary {
+    fn merge(self, other: ArchiveSummary) -> ArchiveSummary {
         assert_eq!(self.archive_url, other.archive_url);
         let mut summarised_forms = self.urls_with_pattern_forms;
         summarised_forms.extend(other.urls_with_pattern_forms);
@@ -316,7 +316,9 @@ pub async fn get_records(
     tx: mpsc::Sender<WarcRecord>,
 ) -> Result<(), BoxDynError> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
-        client.get(&warc_url).send()?,
+        client
+            .get(format!("https://data.commoncrawl.org/{}", &warc_url))
+            .send()?,
     ))));
 
     for record in warc_reader

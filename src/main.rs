@@ -29,7 +29,6 @@ fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
     Ok(BufReader::new(MultiGzDecoder::new(gz))
         .lines()
         .flatten()
-        .map(|url| format!("https://data.commoncrawl.org/{}", url))
         .collect())
 }
 
