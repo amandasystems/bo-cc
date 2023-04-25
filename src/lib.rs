@@ -36,7 +36,7 @@ impl AnalysisWriter {
         // FIXME do compression too!
         while let Ok(summary) = incoming.recv() {
             let archive_fn = format!("forms.d/{}.cbor", nr_seen);
-            let archive_writer = BufWriter::new(fs::File::open(&archive_fn).expect(&format!(
+            let archive_writer = BufWriter::new(fs::File::create(&archive_fn).expect(&format!(
                 "Unable to open archive dump file: {}",
                 &archive_fn
             )));
