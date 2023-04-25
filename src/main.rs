@@ -8,9 +8,10 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::str::FromStr;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use bo_cc::{prepare_db, process_warc};
+use bo_cc::{prepare_db, process_warc, AnalysisWriter, ArchiveSummary};
 
 async fn warc_present(url: &str, db: &sqlx::Pool<sqlx::Sqlite>) -> bool {
     sqlx::query("SELECT 1 FROM archives WHERE record_url=? LIMIT 1;")
@@ -57,6 +58,9 @@ async fn main() -> Result<(), BoxDynError> {
     let client = reqwest::blocking::Client::new();
     let mut urls = stream::iter(get_warcs(&client)?);
     let mut analysis_tasks = JoinSet::new();
+    let (tx_summary, mut rx_summary) = mpsc::channel::<ArchiveSummary>(4);
+
+    let mut writer = AnalysisWriter::new();
 
     while let Some(warc_url) = urls.next().await {
         if warc_present(&warc_url, &db).await {
@@ -65,13 +69,20 @@ async fn main() -> Result<(), BoxDynError> {
         }
 
         info!("Analysing {}", &warc_url);
-        analysis_tasks.spawn(process_warc(warc_url, client.clone(), db.clone()));
+        analysis_tasks.spawn(process_warc(warc_url, client.clone(), tx_summary.clone()));
         if analysis_tasks.len() > 2 {
             trace!("Waiting for a task to finish...");
             if let Err(e) = analysis_tasks.join_next().await.unwrap() {
                 warn!("Task error: {}", e);
             }
         }
+    }
+
+    drop(tx_summary);
+
+    while let Some(res) = rx_summary.recv().await {
+        info!("Recieved WARC!");
+        writer.write(res)?;
     }
 
     // Drain the queue

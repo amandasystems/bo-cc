@@ -17,6 +17,9 @@ httparse = "1.8.0"
 encoding_rs = "0.8.31"
 log = "0.4"
 env_logger = "0.9.0"
+serde = {version = "1.0.160", features = ["derive"]}
+serde_cbor = "0.11.2"
+
 #rayon = "1.7"
 #tokio-rayon = "2.1.0"
 #async-trait = "0.1.68"

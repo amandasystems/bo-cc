@@ -2,61 +2,80 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
+    sync::mpsc::Receiver,
 };
 const COMPRESSION_LEVEL: u32 = 6;
+use serde::{Deserialize, Serialize};
 
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
-use futures::future::join_all;
 use httparse::Header;
-use log::{info, trace, warn};
+use log::{error, info, trace, warn};
 use rust_warc::{WarcReader, WarcRecord};
 use sqlx::error::BoxDynError;
+use std::fs;
+use std::io::prelude::*;
+use std::io::BufWriter;
 use tokio::{sync::mpsc, task::JoinSet};
 
-#[derive(Debug)]
+const WRITE_BACKLOG: usize = 32;
+
+pub struct AnalysisWriter {
+    inbox: std::sync::mpsc::SyncSender<ArchiveSummary>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl AnalysisWriter {
+    fn process_inbox(incoming: Receiver<ArchiveSummary>) {
+        info!("Writer thread started!");
+        fs::create_dir_all("forms.d").expect("Unable to create forms.d directory!");
+        let mut nr_seen = 0;
+        let mut index_bw =
+            BufWriter::new(fs::File::create("forms.d/index").expect("Unable to open index file"));
+        // FIXME do compression too!
+        while let Ok(summary) = incoming.recv() {
+            let archive_fn = format!("forms.d/{}.cbor", nr_seen);
+            let archive_writer = BufWriter::new(fs::File::open(&archive_fn).expect(&format!(
+                "Unable to open archive dump file: {}",
+                &archive_fn
+            )));
+
+            // Add compression!
+            serde_cbor::to_writer(archive_writer, &summary)
+                .expect("Error writing archive summary!");
+
+            writeln!(index_bw, "{}", summary.archive_url)
+                .expect("Unable to write WARC URL to index!");
+            nr_seen += 1;
+        }
+    }
+    pub fn close(self: Self) {
+        drop(self.inbox);
+        if let Err(e) = self.thread.join() {
+            error!("Writer: Join error: {:#?}", e);
+        }
+    }
+    pub fn write(&mut self, summary: ArchiveSummary) -> Result<(), BoxDynError> {
+        self.inbox.send(summary)?;
+        Ok(())
+    }
+    pub fn new() -> Self {
+        let (send, recieve) = std::sync::mpsc::sync_channel(WRITE_BACKLOG);
+        Self {
+            inbox: send,
+            thread: std::thread::spawn(move || Self::process_inbox(recieve)),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct URLSummary {
     url: String,
     with_patterns: Vec<String>,
 }
 
-impl URLSummary {
-    async fn write_out(
-        &self,
-        warc_id: i64,
-        db: &sqlx::Pool<sqlx::Sqlite>,
-    ) -> Result<(), BoxDynError> {
-        let url_id = sqlx::query("INSERT INTO urls(page_url, from_archive_id) VALUES (?, ?);")
-            .bind(&self.url)
-            .bind(warc_id)
-            .execute(db)
-            .await?
-            .last_insert_rowid();
-
-        use std::io::prelude::*;
-        use xz2::bufread::XzEncoder;
-
-        let submit_all = self.with_patterns.iter().map(|form| {
-            let compressed_form: Vec<u8> = XzEncoder::new(form.as_bytes(), COMPRESSION_LEVEL)
-                .bytes()
-                .map(|x| x.unwrap())
-                .collect();
-            sqlx::query("INSERT INTO forms(form, from_url) VALUES (?, ?)")
-                .bind(compressed_form)
-                .bind(url_id)
-                .execute(db)
-        });
-
-        for r in join_all(submit_all).await {
-            r?;
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ArchiveSummary {
     archive_url: String,
     nr_unknown_encoding: i64,
@@ -66,73 +85,67 @@ pub struct ArchiveSummary {
 }
 
 impl ArchiveSummary {
-    fn new(archive_url: String) -> ArchiveSummary {
-        ArchiveSummary {
-            archive_url,
-            nr_unknown_encoding: 0,
-            nr_urls_without_patterns: 0,
-            nr_forms_without_patterns: 0,
-            urls_with_pattern_forms: Vec::with_capacity(1024),
-        }
-    }
-
-    fn add_result(&mut self, result: AnalysisResult) {
+    fn new(archive_url: String, initial: AnalysisResult) -> ArchiveSummary {
         use AnalysisResult::*;
-        match result {
-            NotHTML => (),
-            UnknownEncoding => self.nr_unknown_encoding += 1,
-            NoForms => self.nr_urls_without_patterns += 1,
+        match initial {
+            NotHTML => ArchiveSummary {
+                archive_url,
+                nr_unknown_encoding: 0,
+                nr_urls_without_patterns: 0,
+                nr_forms_without_patterns: 0,
+                urls_with_pattern_forms: Vec::with_capacity(1024),
+            },
+            UnknownEncoding => ArchiveSummary {
+                archive_url,
+                nr_unknown_encoding: 1,
+                nr_urls_without_patterns: 0,
+                nr_forms_without_patterns: 0,
+                urls_with_pattern_forms: Vec::with_capacity(1024),
+            },
+            NoForms => ArchiveSummary {
+                archive_url,
+                nr_unknown_encoding: 0,
+                nr_urls_without_patterns: 1,
+                nr_forms_without_patterns: 0,
+                urls_with_pattern_forms: Vec::with_capacity(1024),
+            },
             FormsWithPatterns {
                 url,
                 with,
                 nr_without,
-            } => {
-                self.nr_forms_without_patterns += nr_without;
-                self.urls_with_pattern_forms.push(URLSummary {
+            } => ArchiveSummary {
+                archive_url,
+                nr_unknown_encoding: 0,
+                nr_urls_without_patterns: 0,
+                nr_forms_without_patterns: nr_without,
+                urls_with_pattern_forms: vec![URLSummary {
                     url,
                     with_patterns: with,
-                })
-            }
-            NoFormsWithPatterns { nr_forms } => {
-                self.nr_urls_without_patterns += 1;
-                self.nr_forms_without_patterns += nr_forms;
-            }
+                }],
+            },
+            NoFormsWithPatterns { nr_forms } => ArchiveSummary {
+                archive_url,
+                nr_unknown_encoding: 0,
+                nr_urls_without_patterns: 1,
+                nr_forms_without_patterns: nr_forms,
+                urls_with_pattern_forms: Vec::with_capacity(1024),
+            },
         }
     }
 
-    pub async fn write_out(&self, db: &sqlx::Pool<sqlx::Sqlite>) -> Result<(), BoxDynError> {
-        let nr_forms_with_pattern: i64 = self
-            .urls_with_pattern_forms
-            .iter()
-            .map(|u| u.with_patterns.len() as i64)
-            .sum();
-        let warc_id = sqlx::query(
-            "INSERT INTO archives(record_url, nr_urls, nr_unknown_encoding, nr_forms) VALUES(?, ?, ?, ?)",
-        )
-        .bind(&self.archive_url)
-        .bind(self.nr_urls_without_patterns + self.urls_with_pattern_forms.len() as i64)
-        .bind(self.nr_unknown_encoding)
-        .bind(self.nr_forms_without_patterns + nr_forms_with_pattern)
-        .execute(db)
-        .await?
-        .last_insert_rowid();
-
-        let mut url_jobs = Vec::with_capacity(self.urls_with_pattern_forms.len());
-
-        info!(
-            "Found {} forms with patterns in WARC {}",
-            self.urls_with_pattern_forms.len(),
-            &self.archive_url
-        );
-
-        for summary in self.urls_with_pattern_forms.iter() {
-            url_jobs.push(summary.write_out(warc_id, db));
+    fn merge(mut self, other: ArchiveSummary) -> ArchiveSummary {
+        assert_eq!(self.archive_url, other.archive_url);
+        let mut summarised_forms = self.urls_with_pattern_forms;
+        summarised_forms.extend(other.urls_with_pattern_forms);
+        ArchiveSummary {
+            archive_url: self.archive_url,
+            nr_unknown_encoding: self.nr_unknown_encoding + other.nr_unknown_encoding,
+            nr_urls_without_patterns: self.nr_urls_without_patterns
+                + other.nr_urls_without_patterns,
+            nr_forms_without_patterns: self.nr_forms_without_patterns
+                + other.nr_forms_without_patterns,
+            urls_with_pattern_forms: summarised_forms,
         }
-
-        for j in join_all(url_jobs).await {
-            j?;
-        }
-        Ok(())
     }
 }
 
@@ -312,9 +325,9 @@ pub async fn get_records(
 pub async fn process_warc(
     url: String,
     client: reqwest::blocking::Client,
-    db: sqlx::Pool<sqlx::Sqlite>,
+    outbox: tokio::sync::mpsc::Sender<ArchiveSummary>,
 ) -> Result<(), BoxDynError> {
-    let (tx_records, mut rx_records) = mpsc::channel::<WarcRecord>(10);
+    let (tx_records, mut rx_records) = mpsc::channel::<WarcRecord>(1);
     // FIXME use lifetimes to get rid of this clone!
     let parse_warc = tokio::task::spawn(get_records(url.clone(), client, tx_records));
     let mut workers = JoinSet::new();
@@ -325,18 +338,16 @@ pub async fn process_warc(
         );
     }
 
-    // FIXME this is not worth it for the logging!
     let mut summary = ArchiveSummary::new(url.clone());
     while let Some(r) = workers.join_next().await {
         /* If something went wrong with the pipes,
         the whole system is unsound and we cannot trust the result! */
         summary.add_result(r??);
     }
-
+    parse_warc.await??;
     info!("Done with WARC ID {}", &url);
 
-    parse_warc.await??;
-    summary.write_out(&db).await?;
+    outbox.send(summary).await?;
 
     Ok(())
 }
