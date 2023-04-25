@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashSet,
     error::Error,
     io::{self, BufReader, ErrorKind},
     sync::mpsc::Receiver,
@@ -20,6 +21,13 @@ use std::io::BufWriter;
 use tokio::{sync::mpsc, task::JoinSet};
 
 const WRITE_BACKLOG: usize = 32;
+
+pub fn processed_warcs() -> HashSet<String> {
+    BufReader::new(fs::File::open("forms.d/index").expect("No index file!"))
+        .lines()
+        .flatten()
+        .collect()
+}
 
 pub struct AnalysisWriter {
     inbox: std::sync::mpsc::SyncSender<ArchiveSummary>,

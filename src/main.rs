@@ -11,15 +11,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use bo_cc::{prepare_db, process_warc, AnalysisWriter, ArchiveSummary};
+use bo_cc::{prepare_db, process_warc, processed_warcs, AnalysisWriter, ArchiveSummary};
 
-async fn warc_present(url: &str, db: &sqlx::Pool<sqlx::Sqlite>) -> bool {
-    sqlx::query("SELECT 1 FROM archives WHERE record_url=? LIMIT 1;")
-        .bind(url)
-        .fetch_optional(db)
-        .await
-        .unwrap()
-        .is_some()
+fn warc_present(url: &str) -> bool {
+    let x = processed_warcs();
+    x.contains(url)
 }
 
 fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
@@ -63,7 +59,7 @@ async fn main() -> Result<(), BoxDynError> {
     let mut writer = AnalysisWriter::new();
 
     while let Some(warc_url) = urls.next().await {
-        if warc_present(&warc_url, &db).await {
+        if warc_present(&warc_url) {
             info!("Skipping already processed WARC {}", &warc_url);
             continue;
         }
