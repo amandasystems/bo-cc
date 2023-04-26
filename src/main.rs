@@ -1,8 +1,12 @@
 use flate2::read::MultiGzDecoder;
+use log::error;
 use log::info;
+use log::trace;
 use reqwest::blocking::Client;
 use std::io::prelude::*;
 use std::io::BufReader;
+use std::thread;
+use std::time;
 
 use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
 
@@ -35,9 +39,17 @@ fn main() -> Result<(), BoxDynError> {
     let mut writer = AnalysisWriter::new();
 
     for warc_url in warc_urls {
-        info!("Analysing {}", &warc_url);
-        let summary = process_warc(&warc_url, client.clone())?;
-        writer.write(warc_url, summary)?;
+        trace!("Analysing {}", &warc_url);
+        match process_warc(&warc_url, &client) {
+            Ok(summary) => writer.write(warc_url, summary)?,
+            Err(e) => {
+                error!(
+                    "Error fetching {}: {}, nothing written for that WARC",
+                    warc_url, e
+                );
+                thread::sleep(time::Duration::from_secs(60));
+            }
+        }
     }
     info!("All WARCs processed!");
 

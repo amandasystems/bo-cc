@@ -310,7 +310,7 @@ fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> 
 
 pub fn get_records(
     warc_url: &str,
-    client: blocking::Client,
+    client: &blocking::Client,
 ) -> Result<impl Iterator<Item = WarcRecord>, BoxDynError> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
@@ -324,7 +324,7 @@ pub fn get_records(
         .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
 }
 
-pub fn process_warc(url: &str, client: blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
+pub fn process_warc(url: &str, client: &blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
     let summary = get_records(url, client)?
         .into_iter()
         .par_bridge()
