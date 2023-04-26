@@ -60,6 +60,7 @@ impl AnalysisWriter {
                 .expect("Error writing archive summary!");
 
             writeln!(index_bw, "{}", warc_url).expect("Unable to write WARC URL to index!");
+            index_bw.flush().expect("Unable to write to index!");
             nr_seen += 1;
         }
     }

@@ -37,7 +37,6 @@ fn main() -> Result<(), BoxDynError> {
     for warc_url in warc_urls {
         info!("Analysing {}", &warc_url);
         let summary = process_warc(&warc_url, client.clone())?;
-        println!("{:?}", &summary);
         writer.write(warc_url, summary)?;
     }
     info!("All WARCs processed!");
