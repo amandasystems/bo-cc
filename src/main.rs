@@ -1,31 +1,25 @@
 use flate2::read::MultiGzDecoder;
-use futures::stream::{self, StreamExt};
-use log::{info, trace, warn};
+use log::error;
+use log::info;
+use log::trace;
 use reqwest::blocking::Client;
-use sqlx::error::BoxDynError;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::str::FromStr;
-use std::time::Duration;
-use tokio::task::JoinSet;
+use std::thread;
+use std::time;
 
-use bo_cc::{prepare_db, process_warc};
+use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
 
-async fn warc_present(url: &str, db: &sqlx::Pool<sqlx::Sqlite>) -> bool {
-    sqlx::query("SELECT 1 FROM archives WHERE record_url=? LIMIT 1;")
-        .bind(url)
-        .fetch_optional(db)
-        .await
-        .unwrap()
-        .is_some()
+fn warc_absent(url: &String) -> bool {
+    let x = processed_warcs(); // FIXME: this is S L O W
+    !x.contains(url)
 }
 
-fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
+fn get_warcs(client: &Client) -> Result<impl Iterator<Item = String>, BoxDynError> {
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
-            .get(" https://data.commoncrawl.org/crawl-data/CC-MAIN-2022-49/warc.paths.gz")
+            .get("https://data.commoncrawl.org/crawl-data/CC-MAIN-2022-49/warc.paths.gz")
             .send()?
             .error_for_status()?,
     );
@@ -33,56 +27,31 @@ fn get_warcs(client: &Client) -> Result<Vec<String>, BoxDynError> {
     Ok(BufReader::new(MultiGzDecoder::new(gz))
         .lines()
         .flatten()
-        .map(|url| format!("https://data.commoncrawl.org/{}", url))
-        .collect())
+        .filter(warc_absent))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxDynError> {
+fn main() -> Result<(), BoxDynError> {
     env_logger::init();
 
-    let sqlite_options = SqliteConnectOptions::from_str("sqlite://form_validation.db")
-        .unwrap()
-        .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        .synchronous(SqliteSynchronous::Normal)
-        .busy_timeout(Duration::from_secs(1200));
-
-    let db = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(sqlite_options)
-        .await?;
-
-    prepare_db(&db).await; // We must finish preparing the DB before allocating to it.
-
     let client = reqwest::blocking::Client::new();
-    let mut urls = stream::iter(get_warcs(&client)?);
-    let mut analysis_tasks = JoinSet::new();
+    let warc_urls = get_warcs(&client)?;
 
-    while let Some(warc_url) = urls.next().await {
-        if warc_present(&warc_url, &db).await {
-            info!("Skipping already processed WARC {}", &warc_url);
-            continue;
-        }
+    let mut writer = AnalysisWriter::new();
 
-        info!("Analysing {}", &warc_url);
-        analysis_tasks.spawn(process_warc(warc_url, client.clone(), db.clone()));
-        if analysis_tasks.len() > 2 {
-            trace!("Waiting for a task to finish...");
-            if let Err(e) = analysis_tasks.join_next().await.unwrap() {
-                warn!("Task error: {}", e);
+    for warc_url in warc_urls {
+        trace!("Analysing {}", &warc_url);
+        match process_warc(&warc_url, &client) {
+            Ok(summary) => writer.write(warc_url, summary)?,
+            Err(e) => {
+                error!(
+                    "Error fetching {}: {}, nothing written for that WARC",
+                    warc_url, e
+                );
+                thread::sleep(time::Duration::from_secs(60));
             }
         }
     }
-
-    // Drain the queue
-    while let Some(outcome) = analysis_tasks.join_next().await {
-        if let Err(e) = outcome {
-            warn!("Task error: {}", e);
-        }
-    }
-
-    info!("All paths submitted!");
+    info!("All WARCs processed!");
 
     Ok(())
 }
