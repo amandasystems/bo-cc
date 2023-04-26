@@ -12,12 +12,16 @@ use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
 use httparse::Header;
 use log::{error, info, trace, warn};
+use rayon::iter::ParallelBridge;
+use rayon::prelude::ParallelIterator;
+use rayon::prelude::*;
+use reqwest::blocking;
 use rust_warc::{WarcReader, WarcRecord};
-use sqlx::error::BoxDynError;
 use std::fs;
 use std::io::prelude::*;
 use std::io::BufWriter;
-use tokio::{sync::mpsc, task::JoinSet};
+
+pub type BoxDynError = Box<dyn Error + 'static + Send + Sync>;
 
 const WRITE_BACKLOG: usize = 32;
 
@@ -313,67 +317,39 @@ fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> 
     Ok((nr_forms, interesting_forms))
 }
 
-pub async fn get_records(
-    warc_url: String,
-    client: reqwest::blocking::Client,
-    tx: mpsc::Sender<WarcRecord>,
-) -> Result<(), BoxDynError> {
+pub fn get_records(
+    warc_url: &str,
+    client: blocking::Client,
+) -> Result<impl Iterator<Item = WarcRecord>, BoxDynError> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
-            .get(format!("https://data.commoncrawl.org/{}", &warc_url))
-            .send()?,
+            .get(format!("https://data.commoncrawl.org/{}", warc_url))
+            .send()?
+            .error_for_status()?,
     ))));
 
-    for record in warc_reader
+    Ok(warc_reader
         .filter_map(|r| r.ok())
-        .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into()))
-    {
-        tx.send(record)
-            .await
-            .map_err(|e| format!("Error sending WARC {} for analysis: {}", e, warc_url))?;
-    }
-    Ok(())
+        .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
 }
 
-pub async fn process_warc(
-    url: String,
-    client: reqwest::blocking::Client,
-    outbox: tokio::sync::mpsc::Sender<ArchiveSummary>,
-) -> Result<(), BoxDynError> {
-    let (tx_records, mut rx_records) = mpsc::channel::<WarcRecord>(1);
-    // FIXME use lifetimes to get rid of this clone!
-    let parse_warc = tokio::task::spawn(get_records(url.clone(), client, tx_records));
-    let mut workers = JoinSet::new();
-
-    while let Some(record) = rx_records.recv().await {
-        workers.spawn(
-            async move { tokio::task::spawn_blocking(move || analyse_record(record)).await },
-        );
-    }
-
+pub fn process_warc(url: String, client: blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
+    let results: Vec<AnalysisResult> = get_records(&url, client)?
+        .into_iter()
+        .par_bridge()
+        .map(analyse_record)
+        .collect();
     let mut summary: Option<ArchiveSummary> = None;
-    while let Some(r) = workers.join_next().await {
-        let r = ArchiveSummary::new(url.clone(), r??);
 
+    // FIXME reimplement as reduce!
+    for r in results {
+        let r = ArchiveSummary::new(url.clone(), r);
         if let Some(inner) = summary {
             summary = Some(inner.merge(r));
         } else {
             summary = Some(r);
         }
     }
-    parse_warc.await??;
     info!("Done with WARC ID {}", &url);
-
-    outbox.send(summary.unwrap()).await?;
-
-    Ok(())
-}
-
-pub async fn prepare_db(db: &sqlx::Pool<sqlx::Sqlite>) {
-    info!("Initialising database...");
-    sqlx::query(include_str!("sql/init-db.sql"))
-        .execute(db)
-        .await
-        .unwrap();
-    info!("Done initialising database!");
+    Ok(summary.unwrap())
 }
