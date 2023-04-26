@@ -1,15 +1,14 @@
 use flate2::read::MultiGzDecoder;
-use log::{info, trace, warn};
+use log::info;
 use reqwest::blocking::Client;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::sync::mpsc;
 
-use bo_cc::{process_warc, processed_warcs, AnalysisWriter, ArchiveSummary, BoxDynError};
+use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
 
-fn warc_present(url: &String) -> bool {
-    let x = processed_warcs();
-    x.contains(url)
+fn warc_absent(url: &String) -> bool {
+    let x = processed_warcs(); // FIXME: this is S L O W
+    !x.contains(url)
 }
 
 fn get_warcs(client: &Client) -> Result<impl Iterator<Item = String>, BoxDynError> {
@@ -24,14 +23,7 @@ fn get_warcs(client: &Client) -> Result<impl Iterator<Item = String>, BoxDynErro
     Ok(BufReader::new(MultiGzDecoder::new(gz))
         .lines()
         .flatten()
-        .filter_map(|url| {
-            let full_url = format!("https://data.commoncrawl.org/{}", url);
-            if !warc_present(&full_url) {
-                Some(full_url)
-            } else {
-                None
-            }
-        }))
+        .filter(warc_absent))
 }
 
 fn main() -> Result<(), BoxDynError> {
@@ -39,14 +31,14 @@ fn main() -> Result<(), BoxDynError> {
 
     let client = reqwest::blocking::Client::new();
     let warc_urls = get_warcs(&client)?;
-    let (tx_summary, mut rx_summary) = mpsc::sync_channel::<ArchiveSummary>(4);
 
     let mut writer = AnalysisWriter::new();
 
     for warc_url in warc_urls {
         info!("Analysing {}", &warc_url);
-        let summary = process_warc(warc_url, client.clone())?;
-        println!("{:?}", summary);
+        let summary = process_warc(&warc_url, client.clone())?;
+        println!("{:?}", &summary);
+        writer.write(warc_url, summary)?;
     }
     info!("All WARCs processed!");
 

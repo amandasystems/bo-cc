@@ -14,7 +14,6 @@ use httparse::Header;
 use log::{error, info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
-use rayon::prelude::*;
 use reqwest::blocking;
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
@@ -33,12 +32,12 @@ pub fn processed_warcs() -> Vec<String> {
 }
 
 pub struct AnalysisWriter {
-    inbox: std::sync::mpsc::SyncSender<ArchiveSummary>,
+    inbox: std::sync::mpsc::SyncSender<(String, ArchiveSummary)>,
     thread: std::thread::JoinHandle<()>,
 }
 
 impl AnalysisWriter {
-    fn process_inbox(incoming: Receiver<ArchiveSummary>) {
+    fn process_inbox(incoming: Receiver<(String, ArchiveSummary)>) {
         info!("Writer thread started!");
         fs::create_dir_all("forms.d").expect("Unable to create forms.d directory!");
         let seen = processed_warcs();
@@ -49,7 +48,7 @@ impl AnalysisWriter {
             writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
         }
         // FIXME do compression too!
-        while let Ok(summary) = incoming.recv() {
+        while let Ok((warc_url, summary)) = incoming.recv() {
             let archive_fn = format!("forms.d/{}.cbor", nr_seen);
             let archive_writer = BufWriter::new(fs::File::create(&archive_fn).expect(&format!(
                 "Unable to open archive dump file: {}",
@@ -60,8 +59,7 @@ impl AnalysisWriter {
             serde_cbor::to_writer(archive_writer, &summary)
                 .expect("Error writing archive summary!");
 
-            writeln!(index_bw, "{}", summary.archive_url)
-                .expect("Unable to write WARC URL to index!");
+            writeln!(index_bw, "{}", warc_url).expect("Unable to write WARC URL to index!");
             nr_seen += 1;
         }
     }
@@ -71,8 +69,8 @@ impl AnalysisWriter {
             error!("Writer: Join error: {:#?}", e);
         }
     }
-    pub fn write(&mut self, summary: ArchiveSummary) -> Result<(), BoxDynError> {
-        self.inbox.send(summary)?;
+    pub fn write(&mut self, warc_url: String, summary: ArchiveSummary) -> Result<(), BoxDynError> {
+        self.inbox.send((warc_url, summary))?;
         Ok(())
     }
     pub fn new() -> Self {
@@ -90,9 +88,8 @@ pub struct URLSummary {
     with_patterns: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ArchiveSummary {
-    archive_url: String,
     nr_unknown_encoding: i64,
     nr_urls_without_patterns: i64,
     nr_forms_without_patterns: i64,
@@ -100,25 +97,22 @@ pub struct ArchiveSummary {
 }
 
 impl ArchiveSummary {
-    fn new(archive_url: String, initial: AnalysisResult) -> ArchiveSummary {
+    fn new(initial: AnalysisResult) -> ArchiveSummary {
         use AnalysisResult::*;
         match initial {
             NotHTML => ArchiveSummary {
-                archive_url,
                 nr_unknown_encoding: 0,
                 nr_urls_without_patterns: 0,
                 nr_forms_without_patterns: 0,
                 urls_with_pattern_forms: Vec::with_capacity(1024),
             },
             UnknownEncoding => ArchiveSummary {
-                archive_url,
                 nr_unknown_encoding: 1,
                 nr_urls_without_patterns: 0,
                 nr_forms_without_patterns: 0,
                 urls_with_pattern_forms: Vec::with_capacity(1024),
             },
             NoForms => ArchiveSummary {
-                archive_url,
                 nr_unknown_encoding: 0,
                 nr_urls_without_patterns: 1,
                 nr_forms_without_patterns: 0,
@@ -129,7 +123,6 @@ impl ArchiveSummary {
                 with,
                 nr_without,
             } => ArchiveSummary {
-                archive_url,
                 nr_unknown_encoding: 0,
                 nr_urls_without_patterns: 0,
                 nr_forms_without_patterns: nr_without,
@@ -139,7 +132,6 @@ impl ArchiveSummary {
                 }],
             },
             NoFormsWithPatterns { nr_forms } => ArchiveSummary {
-                archive_url,
                 nr_unknown_encoding: 0,
                 nr_urls_without_patterns: 1,
                 nr_forms_without_patterns: nr_forms,
@@ -149,11 +141,9 @@ impl ArchiveSummary {
     }
 
     fn merge(self, other: ArchiveSummary) -> ArchiveSummary {
-        assert_eq!(self.archive_url, other.archive_url);
         let mut summarised_forms = self.urls_with_pattern_forms;
         summarised_forms.extend(other.urls_with_pattern_forms);
         ArchiveSummary {
-            archive_url: self.archive_url,
             nr_unknown_encoding: self.nr_unknown_encoding + other.nr_unknown_encoding,
             nr_urls_without_patterns: self.nr_urls_without_patterns
                 + other.nr_urls_without_patterns,
@@ -333,23 +323,13 @@ pub fn get_records(
         .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
 }
 
-pub fn process_warc(url: String, client: blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
-    let results: Vec<AnalysisResult> = get_records(&url, client)?
+pub fn process_warc(url: &str, client: blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
+    let summary = get_records(url, client)?
         .into_iter()
         .par_bridge()
         .map(analyse_record)
-        .collect();
-    let mut summary: Option<ArchiveSummary> = None;
-
-    // FIXME reimplement as reduce!
-    for r in results {
-        let r = ArchiveSummary::new(url.clone(), r);
-        if let Some(inner) = summary {
-            summary = Some(inner.merge(r));
-        } else {
-            summary = Some(r);
-        }
-    }
+        .map(|r| ArchiveSummary::new(r))
+        .reduce(|| ArchiveSummary::default(), |a, b| a.merge(b));
     info!("Done with WARC ID {}", &url);
-    Ok(summary.unwrap())
+    Ok(summary)
 }
