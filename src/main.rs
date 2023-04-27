@@ -3,19 +3,16 @@ use log::error;
 use log::info;
 use log::trace;
 use reqwest::blocking::Client;
+use std::collections::HashSet;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::thread;
-use std::time;
 
 use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
 
-fn warc_absent(url: &String) -> bool {
-    let x = processed_warcs(); // FIXME: this is S L O W
-    !x.contains(url)
-}
-
-fn get_warcs(client: &Client) -> Result<impl Iterator<Item = String>, BoxDynError> {
+fn get_warcs(
+    client: &Client,
+    warcs_present: HashSet<String>,
+) -> Result<impl Iterator<Item = String>, reqwest::Error> {
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
@@ -27,14 +24,15 @@ fn get_warcs(client: &Client) -> Result<impl Iterator<Item = String>, BoxDynErro
     Ok(BufReader::new(MultiGzDecoder::new(gz))
         .lines()
         .flatten()
-        .filter(warc_absent))
+        .filter(move |u| !warcs_present.contains(u)))
 }
 
 fn main() -> Result<(), BoxDynError> {
     env_logger::init();
 
     let client = reqwest::blocking::Client::new();
-    let warc_urls = get_warcs(&client)?;
+    let seen: HashSet<String> = processed_warcs().into_iter().collect();
+    let warc_urls = get_warcs(&client, seen)?;
 
     let mut writer = AnalysisWriter::new();
 
@@ -43,11 +41,13 @@ fn main() -> Result<(), BoxDynError> {
         match process_warc(&warc_url, &client) {
             Ok(summary) => writer.write(warc_url, summary)?,
             Err(e) => {
-                error!(
-                    "Error fetching {}: {}, nothing written for that WARC",
-                    warc_url, e
-                );
-                thread::sleep(time::Duration::from_secs(60));
+                let url = e.url().map(|u| u.to_string()).unwrap_or(warc_url);
+                if let Some(code) = e.status() {
+                    error!("Code {} fetchig {}, giving up.", code, url);
+                } else {
+                    error!("Unknown error fetching {}: {}, giving up.", url, e);
+                }
+                break;
             }
         }
     }

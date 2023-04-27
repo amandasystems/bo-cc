@@ -2,7 +2,8 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
-    sync::mpsc::Receiver,
+    sync::mpsc::{self, Receiver},
+    thread,
 };
 const COMPRESSION_LEVEL: u32 = 6;
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
 use httparse::Header;
-use log::{error, info, trace, warn};
+use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
 use reqwest::blocking;
@@ -19,21 +20,25 @@ use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
 use std::io::BufWriter;
+use xz2::write::XzEncoder;
 
 pub type BoxDynError = Box<dyn Error + 'static + Send + Sync>;
 
 const WRITE_BACKLOG: usize = 32;
 
 pub fn processed_warcs() -> Vec<String> {
-    BufReader::new(fs::File::open("forms.d/index").expect("No index file!"))
-        .lines()
-        .flatten()
-        .collect()
+    match fs::File::open("forms.d/index") {
+        Ok(fp) => BufReader::new(fp).lines().flatten().collect(),
+        Err(_) => {
+            info!("No index file found, assuming no previous progress.");
+            vec![]
+        }
+    }
 }
 
 pub struct AnalysisWriter {
-    inbox: std::sync::mpsc::SyncSender<(String, ArchiveSummary)>,
-    thread: std::thread::JoinHandle<()>,
+    inbox: Option<mpsc::SyncSender<(String, ArchiveSummary)>>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl AnalysisWriter {
@@ -47,16 +52,16 @@ impl AnalysisWriter {
         for s in seen.into_iter() {
             writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
         }
-        // FIXME do compression too!
         while let Ok((warc_url, summary)) = incoming.recv() {
-            let archive_fn = format!("forms.d/{}.cbor", nr_seen);
-            let archive_writer = BufWriter::new(fs::File::create(&archive_fn).expect(&format!(
-                "Unable to open archive dump file: {}",
-                &archive_fn
-            )));
+            let archive_fn = format!("forms.d/{}.json.xz", nr_seen);
+            let archive_writer = XzEncoder::new(
+                BufWriter::new(fs::File::create(&archive_fn).unwrap_or_else(|_| {
+                    panic!("Unable to open archive dump file: {}", &archive_fn)
+                })),
+                COMPRESSION_LEVEL,
+            );
 
-            // Add compression!
-            serde_cbor::to_writer(archive_writer, &summary)
+            serde_json::to_writer(archive_writer, &summary)
                 .expect("Error writing archive summary!");
 
             writeln!(index_bw, "{}", warc_url).expect("Unable to write WARC URL to index!");
@@ -64,22 +69,31 @@ impl AnalysisWriter {
             nr_seen += 1;
         }
     }
-    pub fn close(self: Self) {
-        drop(self.inbox);
-        if let Err(e) = self.thread.join() {
-            error!("Writer: Join error: {:#?}", e);
-        }
-    }
     pub fn write(&mut self, warc_url: String, summary: ArchiveSummary) -> Result<(), BoxDynError> {
-        self.inbox.send((warc_url, summary))?;
+        self.inbox.as_ref().unwrap().send((warc_url, summary))?;
         Ok(())
     }
     pub fn new() -> Self {
         let (send, recieve) = std::sync::mpsc::sync_channel(WRITE_BACKLOG);
         Self {
-            inbox: send,
-            thread: std::thread::spawn(move || Self::process_inbox(recieve)),
+            inbox: Some(send),
+            thread: Some(thread::spawn(move || Self::process_inbox(recieve))),
         }
+    }
+}
+
+impl Drop for AnalysisWriter {
+    fn drop(&mut self) {
+        drop(self.inbox.take());
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("Worker error!");
+        }
+    }
+}
+
+impl Default for AnalysisWriter {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -311,7 +325,7 @@ fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> 
 pub fn get_records(
     warc_url: &str,
     client: &blocking::Client,
-) -> Result<impl Iterator<Item = WarcRecord>, BoxDynError> {
+) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
             .get(format!("https://data.commoncrawl.org/{}", warc_url))
@@ -324,13 +338,16 @@ pub fn get_records(
         .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
 }
 
-pub fn process_warc(url: &str, client: &blocking::Client) -> Result<ArchiveSummary, BoxDynError> {
+pub fn process_warc(
+    url: &str,
+    client: &blocking::Client,
+) -> Result<ArchiveSummary, reqwest::Error> {
     let summary = get_records(url, client)?
         .into_iter()
         .par_bridge()
         .map(analyse_record)
-        .map(|r| ArchiveSummary::new(r))
-        .reduce(|| ArchiveSummary::default(), |a, b| a.merge(b));
+        .map(ArchiveSummary::new)
+        .reduce(ArchiveSummary::default, |a, b| a.merge(b));
     info!("Done with WARC ID {}", &url);
     Ok(summary)
 }
