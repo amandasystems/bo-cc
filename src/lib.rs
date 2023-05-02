@@ -8,7 +8,6 @@ use std::{
 const COMPRESSION_LEVEL: u32 = 6;
 use serde::{Deserialize, Serialize};
 
-use attohttpc;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
@@ -52,7 +51,7 @@ impl AnalysisWriter {
             writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
         }
         while let Ok((warc_url, summary)) = incoming.recv() {
-            let archive_fn = format!("forms.d/{}.json.xz", warc_url.replace("/", "!"));
+            let archive_fn = format!("forms.d/{}.json.xz", warc_url.replace('/', "!"));
             let archive_writer = XzEncoder::new(
                 BufWriter::new(fs::File::create(&archive_fn).unwrap_or_else(|_| {
                     panic!("Unable to open archive dump file: {}", &archive_fn)
@@ -124,20 +123,21 @@ impl ArchiveSummary {
     }
 
     fn from_record(record: rust_warc::WarcRecord) -> Option<ArchiveSummary> {
-        let content_type = record
-            .header
-            .get(&"warc-identified-payload-type".into())
-            .unwrap();
+        let content_type = record.header.get(&"warc-identified-payload-type".into())?;
 
         if !(content_type == "text/html" || content_type == "application/xhtml+xml") {
             trace!("Ignoring unknown content type: {}", content_type);
             return None;
         }
 
-        let (nr_forms, with) = {
-            if let Ok(res) = extract_forms(&record.content) {
-                res
-            } else {
+        let (nr_forms, with) = match extract_forms(&record.content) {
+            Ok(res) => res,
+            Err(e) => {
+                trace!(
+                    "Unable to extract forms for URL {}: {}",
+                    record.header.get(&"warc-target-uri".into())?,
+                    e
+                );
                 return Some(ArchiveSummary {
                     nr_unknown_encoding: 1,
                     ..Default::default()
@@ -152,8 +152,10 @@ impl ArchiveSummary {
             });
         }
 
-        let mut header = record.header;
-        let url = header.remove(&"warc-target-uri".into()).unwrap();
+        let url = {
+            let mut header = record.header;
+            header.remove(&"warc-target-uri".into())?
+        };
 
         Some(ArchiveSummary {
             nr_forms_without_patterns: nr_forms - with.len() as i64,

@@ -1,4 +1,3 @@
-use attohttpc;
 use flate2::read::MultiGzDecoder;
 use log::error;
 use log::info;
