@@ -1,12 +1,11 @@
 use flate2::read::MultiGzDecoder;
-use log::error;
-use log::info;
-use log::trace;
+use log::{error, info, trace};
 use std::collections::HashSet;
+use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
 
-use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
+use bo_cc::{process_warc, processed_warcs, AnalysisWriter};
 
 fn get_warcs(
     client: &attohttpc::Session,
@@ -26,7 +25,7 @@ fn get_warcs(
         .filter(move |u| !warcs_present.contains(u)))
 }
 
-fn main() -> Result<(), BoxDynError> {
+fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
     let client = attohttpc::Session::new();

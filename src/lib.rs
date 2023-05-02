@@ -2,7 +2,7 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
-    sync::mpsc::{self, Receiver},
+    sync::mpsc::{self, Receiver, SendError},
     thread,
 };
 const COMPRESSION_LEVEL: u32 = 6;
@@ -21,7 +21,7 @@ use std::io::prelude::*;
 use std::io::BufWriter;
 use xz2::write::XzEncoder;
 
-pub type BoxDynError = Box<dyn Error + 'static + Send + Sync>;
+type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
 
@@ -36,12 +36,12 @@ pub fn processed_warcs() -> Vec<String> {
 }
 
 pub struct AnalysisWriter {
-    inbox: Option<mpsc::SyncSender<(String, ArchiveSummary)>>,
+    inbox: Option<mpsc::SyncSender<UrlAndSummary>>,
     thread: Option<thread::JoinHandle<()>>,
 }
 
 impl AnalysisWriter {
-    fn process_inbox(incoming: Receiver<(String, ArchiveSummary)>) {
+    fn process_inbox(incoming: Receiver<UrlAndSummary>) {
         info!("Writer thread started!");
         fs::create_dir_all("forms.d").expect("Unable to create forms.d directory!");
         let seen = processed_warcs();
@@ -66,8 +66,14 @@ impl AnalysisWriter {
             index_bw.flush().expect("Unable to write to index!");
         }
     }
-    pub fn write(&mut self, warc_url: String, summary: ArchiveSummary) -> Result<(), BoxDynError> {
-        self.inbox.as_ref().unwrap().send((warc_url, summary))?;
+    pub fn write(
+        &mut self,
+        warc_url: String,
+        summary: ArchiveSummary,
+    ) -> Result<(), SendError<UrlAndSummary>> {
+        if let Some(inbox) = self.inbox.as_ref() {
+            inbox.send((warc_url, summary))?;
+        }
         Ok(())
     }
     pub fn new() -> Self {
