@@ -8,6 +8,7 @@ use std::{
 const COMPRESSION_LEVEL: u32 = 6;
 use serde::{Deserialize, Serialize};
 
+use attohttpc;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
@@ -15,7 +16,6 @@ use httparse::Header;
 use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
-use reqwest::blocking;
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
@@ -46,14 +46,13 @@ impl AnalysisWriter {
         info!("Writer thread started!");
         fs::create_dir_all("forms.d").expect("Unable to create forms.d directory!");
         let seen = processed_warcs();
-        let mut nr_seen = seen.len();
         let mut index_bw =
             BufWriter::new(fs::File::create("forms.d/index").expect("Unable to open index file"));
         for s in seen.into_iter() {
             writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
         }
         while let Ok((warc_url, summary)) = incoming.recv() {
-            let archive_fn = format!("forms.d/{}.json.xz", nr_seen);
+            let archive_fn = format!("forms.d/{}.json.xz", warc_url.replace("/", "!"));
             let archive_writer = XzEncoder::new(
                 BufWriter::new(fs::File::create(&archive_fn).unwrap_or_else(|_| {
                     panic!("Unable to open archive dump file: {}", &archive_fn)
@@ -66,7 +65,6 @@ impl AnalysisWriter {
 
             writeln!(index_bw, "{}", warc_url).expect("Unable to write WARC URL to index!");
             index_bw.flush().expect("Unable to write to index!");
-            nr_seen += 1;
         }
     }
     pub fn write(&mut self, warc_url: String, summary: ArchiveSummary) -> Result<(), BoxDynError> {
@@ -112,49 +110,6 @@ pub struct ArchiveSummary {
 }
 
 impl ArchiveSummary {
-    fn new(initial: AnalysisResult) -> ArchiveSummary {
-        use AnalysisResult::*;
-        match initial {
-            NotHTML => ArchiveSummary {
-                nr_unknown_encoding: 0,
-                nr_urls_without_patterns: 0,
-                nr_forms_without_patterns: 0,
-                urls_with_pattern_forms: Vec::with_capacity(1024),
-            },
-            UnknownEncoding => ArchiveSummary {
-                nr_unknown_encoding: 1,
-                nr_urls_without_patterns: 0,
-                nr_forms_without_patterns: 0,
-                urls_with_pattern_forms: Vec::with_capacity(1024),
-            },
-            NoForms => ArchiveSummary {
-                nr_unknown_encoding: 0,
-                nr_urls_without_patterns: 1,
-                nr_forms_without_patterns: 0,
-                urls_with_pattern_forms: Vec::with_capacity(1024),
-            },
-            FormsWithPatterns {
-                url,
-                with,
-                nr_without,
-            } => ArchiveSummary {
-                nr_unknown_encoding: 0,
-                nr_urls_without_patterns: 0,
-                nr_forms_without_patterns: nr_without,
-                urls_with_pattern_forms: vec![URLSummary {
-                    url,
-                    with_patterns: with,
-                }],
-            },
-            NoFormsWithPatterns { nr_forms } => ArchiveSummary {
-                nr_unknown_encoding: 0,
-                nr_urls_without_patterns: 1,
-                nr_forms_without_patterns: nr_forms,
-                urls_with_pattern_forms: Vec::with_capacity(1024),
-            },
-        }
-    }
-
     fn merge(self, other: ArchiveSummary) -> ArchiveSummary {
         let mut summarised_forms = self.urls_with_pattern_forms;
         summarised_forms.extend(other.urls_with_pattern_forms);
@@ -167,21 +122,48 @@ impl ArchiveSummary {
             urls_with_pattern_forms: summarised_forms,
         }
     }
-}
 
-#[derive(Debug)]
-pub enum AnalysisResult {
-    UnknownEncoding,
-    NotHTML,
-    NoForms,
-    NoFormsWithPatterns {
-        nr_forms: i64,
-    },
-    FormsWithPatterns {
-        url: String,
-        with: Vec<String>,
-        nr_without: i64,
-    },
+    fn from_record(record: rust_warc::WarcRecord) -> Option<ArchiveSummary> {
+        let content_type = record
+            .header
+            .get(&"warc-identified-payload-type".into())
+            .unwrap();
+
+        if !(content_type == "text/html" || content_type == "application/xhtml+xml") {
+            trace!("Ignoring unknown content type: {}", content_type);
+            return None;
+        }
+
+        let (nr_forms, with) = {
+            if let Ok(res) = extract_forms(&record.content) {
+                res
+            } else {
+                return Some(ArchiveSummary {
+                    nr_unknown_encoding: 1,
+                    ..Default::default()
+                });
+            }
+        };
+
+        if nr_forms == 0 || with.is_empty() {
+            return Some(ArchiveSummary {
+                nr_urls_without_patterns: 1,
+                ..Default::default()
+            });
+        }
+
+        let mut header = record.header;
+        let url = header.remove(&"warc-target-uri".into()).unwrap();
+
+        Some(ArchiveSummary {
+            nr_forms_without_patterns: nr_forms - with.len() as i64,
+            urls_with_pattern_forms: vec![URLSummary {
+                url,
+                with_patterns: with,
+            }],
+            ..Default::default()
+        })
+    }
 }
 
 fn get_encoding_by_header(headers: [Header; 64]) -> Option<&'static Encoding> {
@@ -239,50 +221,7 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
     }
 }
 
-fn analyse_record(record: rust_warc::WarcRecord) -> AnalysisResult {
-    use crate::AnalysisResult::*;
-
-    let content_type = record
-        .header
-        .get(&"warc-identified-payload-type".into())
-        .unwrap();
-
-    if !(content_type == "text/html" || content_type == "application/xhtml+xml") {
-        trace!("Ignoring unknown content type: {}", content_type);
-        return NotHTML;
-    }
-
-    let (nr_forms, with) = {
-        if let Ok(res) = second_opinion(&record.content) {
-            res
-        } else {
-            return UnknownEncoding;
-        }
-    };
-
-    if nr_forms == 0 {
-        return NoForms;
-    }
-
-    if with.is_empty() {
-        return NoFormsWithPatterns { nr_forms };
-    }
-
-    let nr_with = with.len() as i64;
-    let url = record
-        .header
-        .get(&"warc-target-uri".into())
-        .unwrap()
-        .to_string();
-
-    FormsWithPatterns {
-        url,
-        nr_without: nr_forms - nr_with,
-        with,
-    }
-}
-
-fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
+fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
     let body = decode_body(content)?;
     let dom = tl::parse(&body, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
@@ -324,8 +263,8 @@ fn second_opinion(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> 
 
 pub fn get_records(
     warc_url: &str,
-    client: &blocking::Client,
-) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
+    client: &attohttpc::Session,
+) -> Result<impl Iterator<Item = WarcRecord>, attohttpc::Error> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
             .get(format!("https://data.commoncrawl.org/{}", warc_url))
@@ -340,13 +279,12 @@ pub fn get_records(
 
 pub fn process_warc(
     url: &str,
-    client: &blocking::Client,
-) -> Result<ArchiveSummary, reqwest::Error> {
+    client: &attohttpc::Session,
+) -> Result<ArchiveSummary, attohttpc::Error> {
     let summary = get_records(url, client)?
         .into_iter()
         .par_bridge()
-        .map(analyse_record)
-        .map(ArchiveSummary::new)
+        .flat_map(ArchiveSummary::from_record)
         .reduce(ArchiveSummary::default, |a, b| a.merge(b));
     info!("Done with WARC ID {}", &url);
     Ok(summary)

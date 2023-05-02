@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-reqwest = { version = "0.11", features = ["blocking"] }
 tl = {version = "0.7.7"}
 chardetng = "0.1.17"
 flate2 = { version = "1.0", features = ["zlib-ng"], default-features = false }
@@ -17,14 +16,10 @@ env_logger = "0.9.0"
 rayon = "1.7.0"
 serde = {version = "1.0.160", features = ["derive"]}
 serde_json = "1.0.96"
-
-#rayon = "1.7"
-#tokio-rayon = "2.1.0"
-#async-trait = "0.1.68"
+attohttpc = {version = "0.25.0", features=["compress-zlib-ng"]}
 
 
-
-#[profile.release]
-#lto = true          # Enable link-time optimization
-#codegen-units = 1   # Reduce number of codegen units to increase optimizations
+[profile.release]
+lto = true          # Enable link-time optimization
+codegen-units = 1   # Reduce number of codegen units to increase optimizations
 # panic = 'abort'   # Abort on panic

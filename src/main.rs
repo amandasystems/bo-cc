@@ -1,8 +1,8 @@
+use attohttpc;
 use flate2::read::MultiGzDecoder;
 use log::error;
 use log::info;
 use log::trace;
-use reqwest::blocking::Client;
 use std::collections::HashSet;
 use std::io::prelude::*;
 use std::io::BufReader;
@@ -10,9 +10,9 @@ use std::io::BufReader;
 use bo_cc::{process_warc, processed_warcs, AnalysisWriter, BoxDynError};
 
 fn get_warcs(
-    client: &Client,
+    client: &attohttpc::Session,
     warcs_present: HashSet<String>,
-) -> Result<impl Iterator<Item = String>, reqwest::Error> {
+) -> Result<impl Iterator<Item = String>, attohttpc::Error> {
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
@@ -30,7 +30,7 @@ fn get_warcs(
 fn main() -> Result<(), BoxDynError> {
     env_logger::init();
 
-    let client = reqwest::blocking::Client::new();
+    let client = attohttpc::Session::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen)?;
 
@@ -41,12 +41,7 @@ fn main() -> Result<(), BoxDynError> {
         match process_warc(&warc_url, &client) {
             Ok(summary) => writer.write(warc_url, summary)?,
             Err(e) => {
-                let url = e.url().map(|u| u.to_string()).unwrap_or(warc_url);
-                if let Some(code) = e.status() {
-                    error!("Code {} fetchig {}, giving up.", code, url);
-                } else {
-                    error!("Unknown error fetching {}: {}, giving up.", url, e);
-                }
+                error!("Unknown error fetching {}: {}, giving up.", warc_url, e);
                 break;
             }
         }
