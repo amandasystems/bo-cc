@@ -19,7 +19,7 @@ use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
 use std::io::BufWriter;
-use xz2::write::XzEncoder;
+use xz2::{read::XzDecoder, write::XzEncoder};
 
 type UrlAndSummary = (String, ArchiveSummary);
 
@@ -50,8 +50,10 @@ impl AnalysisWriter {
         for s in seen.into_iter() {
             writeln!(index_bw, "{}", s).expect("Unable to rewrite index!");
         }
+        index_bw.flush().expect("Unable to write to index!");
+
         while let Ok((warc_url, summary)) = incoming.recv() {
-            let archive_fn = format!("forms.d/{}.json.xz", warc_url.replace('/', "!"));
+            let archive_fn = to_storage_fn(&warc_url);
             let archive_writer = XzEncoder::new(
                 BufWriter::new(fs::File::create(&archive_fn).unwrap_or_else(|_| {
                     panic!("Unable to open archive dump file: {}", &archive_fn)
@@ -85,6 +87,10 @@ impl AnalysisWriter {
     }
 }
 
+pub fn to_storage_fn(warc_url: &str) -> String {
+    format!("forms.d/{}.json.xz", warc_url.replace('/', "!"))
+}
+
 impl Drop for AnalysisWriter {
     fn drop(&mut self) {
         drop(self.inbox.take());
@@ -102,20 +108,25 @@ impl Default for AnalysisWriter {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct URLSummary {
-    url: String,
-    with_patterns: Vec<String>,
+    pub url: String,
+    pub with_patterns: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ArchiveSummary {
-    nr_unknown_encoding: i64,
-    nr_urls_without_patterns: i64,
-    nr_forms_without_patterns: i64,
-    urls_with_pattern_forms: Vec<URLSummary>,
+    pub nr_unknown_encoding: i64,
+    pub nr_urls_without_patterns: i64,
+    pub nr_forms_without_patterns: i64,
+    pub urls_with_pattern_forms: Vec<URLSummary>,
 }
 
 impl ArchiveSummary {
-    fn merge(self, other: ArchiveSummary) -> ArchiveSummary {
+    pub fn from_file(file_name: &str) -> Result<Self, std::io::Error> {
+        let x: ArchiveSummary =
+            serde_json::from_reader(BufReader::new(XzDecoder::new(fs::File::open(file_name)?)))?;
+        Ok(x)
+    }
+    pub fn merge(self, other: ArchiveSummary) -> ArchiveSummary {
         let mut summarised_forms = self.urls_with_pattern_forms;
         summarised_forms.extend(other.urls_with_pattern_forms);
         ArchiveSummary {
@@ -275,7 +286,7 @@ pub fn get_records(
 ) -> Result<impl Iterator<Item = WarcRecord>, attohttpc::Error> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
-            .get(format!("https://data.commoncrawl.org/{}", warc_url))
+            .get(format!("http://data.commoncrawl.org/{}", warc_url))
             .send()?
             .error_for_status()?,
     ))));

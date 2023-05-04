@@ -14,7 +14,7 @@ fn get_warcs(
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
-            .get("https://data.commoncrawl.org/crawl-data/CC-MAIN-2022-49/warc.paths.gz")
+            .get("http://data.commoncrawl.org/crawl-data/CC-MAIN-2023-14/warc.paths.gz")
             .send()?
             .error_for_status()?,
     );
