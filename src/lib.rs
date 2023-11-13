@@ -6,6 +6,7 @@ use std::{
     thread,
 };
 const COMPRESSION_LEVEL: u32 = 6;
+use semaphore::Semaphore;
 use serde::{Deserialize, Serialize};
 
 use chardetng::EncodingDetector;
@@ -24,6 +25,7 @@ use xz2::{read::XzDecoder, write::XzEncoder};
 type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
+const SIMULTANEOUS_FETCHES: usize = 1;
 
 pub fn user_agent() -> String {
     format!("bo-cc/{}", env!("CARGO_PKG_VERSION"))
@@ -286,10 +288,18 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
 
 pub fn get_records(
     warc_url: &str,
-    client: &attohttpc::Session,
+    client: Semaphore<&attohttpc::Session>,
 ) -> Result<impl Iterator<Item = WarcRecord>, attohttpc::Error> {
+    let client_handle = {
+        loop {
+            if let Ok(guard) = client.try_access() {
+                break guard;
+            }
+        }
+    };
+
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
-        client
+        client_handle
             .get(format!("http://data.commoncrawl.org/{}", warc_url))
             .header("User-agent", user_agent())
             .send()?
@@ -305,7 +315,9 @@ pub fn process_warc(
     url: &str,
     client: &attohttpc::Session,
 ) -> Result<ArchiveSummary, attohttpc::Error> {
-    let summary = get_records(url, client)?
+    let limited_getter = Semaphore::new(SIMULTANEOUS_FETCHES, client);
+
+    let summary = get_records(url, limited_getter)?
         .into_iter()
         .par_bridge()
         .flat_map(ArchiveSummary::from_record)
