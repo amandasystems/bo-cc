@@ -63,6 +63,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "httparse",
+ "lazy_static",
  "log",
  "rayon",
  "rust_warc",

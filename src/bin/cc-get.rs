@@ -5,7 +5,7 @@ use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
 
-use bo_cc::{process_warc, processed_warcs, AnalysisWriter};
+use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
 
 fn get_warcs(
     client: &attohttpc::Session,
@@ -15,6 +15,7 @@ fn get_warcs(
     let gz = BufReader::new(
         client
             .get("http://data.commoncrawl.org/crawl-data/CC-MAIN-2023-14/warc.paths.gz")
+            .header("User-agent", user_agent())
             .send()?
             .error_for_status()?,
     );

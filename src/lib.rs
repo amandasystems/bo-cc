@@ -25,6 +25,10 @@ type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
 
+pub fn user_agent() -> String {
+    format!("bo-cc/{}", env!("CARGO_PKG_VERSION"))
+}
+
 pub fn processed_warcs() -> Vec<String> {
     match fs::File::open("forms.d/index") {
         Ok(fp) => BufReader::new(fp).lines().flatten().collect(),
@@ -287,6 +291,7 @@ pub fn get_records(
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client
             .get(format!("http://data.commoncrawl.org/{}", warc_url))
+            .header("User-agent", user_agent())
             .send()?
             .error_for_status()?,
     ))));
