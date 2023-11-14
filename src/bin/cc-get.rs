@@ -12,11 +12,15 @@ use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
 fn get_warcs(
     client: &attohttpc::Session,
     warcs_present: HashSet<String>,
+    archive: &str,
 ) -> Result<impl Iterator<Item = String>, attohttpc::Error> {
     // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
-            .get("http://data.commoncrawl.org/crawl-data/CC-MAIN-2023-14/warc.paths.gz")
+            .get(format!(
+                "http://data.commoncrawl.org/crawl-data/{}/warc.paths.gz",
+                archive
+            ))
             .header("User-agent", user_agent())
             .send()?
             .error_for_status()?,
@@ -31,9 +35,13 @@ fn get_warcs(
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
 
+    let archive = std::env::args()
+        .nth(1)
+        .ok_or("Usage: cc-get <archive, e.g. CC-MAIN-2023-40>")?;
+
     let client = attohttpc::Session::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
-    let warc_urls = get_warcs(&client, seen)?;
+    let warc_urls = get_warcs(&client, seen, &archive)?;
     println!("Waiting for cooldown...");
     thread::sleep(Duration::from_secs_f32(2.0));
 
