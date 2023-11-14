@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
+use std::thread;
+use std::time::Duration;
 
 use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
 
@@ -32,6 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = attohttpc::Session::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen)?;
+    println!("Waiting for cooldown...");
+    thread::sleep(Duration::from_secs_f32(2.0));
 
     let mut writer = AnalysisWriter::new();
 
