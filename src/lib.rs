@@ -2,11 +2,14 @@ use std::{
     borrow::Cow,
     error::Error,
     io::{self, BufReader, ErrorKind},
-    sync::mpsc::{self, Receiver, SendError},
+    sync::{
+        mpsc::{self, Receiver, SendError},
+        Arc, Mutex,
+    },
     thread,
+    time::SystemTime,
 };
 const COMPRESSION_LEVEL: u32 = 6;
-use semaphore::Semaphore;
 use serde::{Deserialize, Serialize};
 
 use chardetng::EncodingDetector;
@@ -16,7 +19,7 @@ use httparse::Header;
 use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
-use reqwest::blocking::Client;
+use reqwest::blocking::{ClientBuilder, Response};
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
@@ -29,10 +32,6 @@ const WRITE_BACKLOG: usize = 32;
 pub const SIMULTANEOUS_FETCHES: usize = 1;
 pub const COOLDOWN_S: f32 = 2.0;
 
-pub fn user_agent() -> String {
-    format!("bo-cc/{}", env!("CARGO_PKG_VERSION"))
-}
-
 pub fn processed_warcs() -> Vec<String> {
     match fs::File::open("forms.d/index") {
         Ok(fp) => BufReader::new(fp).lines().flatten().collect(),
@@ -40,6 +39,47 @@ pub fn processed_warcs() -> Vec<String> {
             info!("No index file found, assuming no previous progress.");
             vec![]
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct Client {
+    inner: reqwest::blocking::Client,
+    last_req: Arc<Mutex<SystemTime>>,
+}
+
+impl Client {
+    pub fn new() -> Self {
+        Client {
+            inner: ClientBuilder::new()
+                .user_agent(format!("bo-cc/{}", env!("CARGO_PKG_VERSION")))
+                .connection_verbose(true)
+                .build()
+                .unwrap(),
+            last_req: Arc::new(Mutex::new(std::time::UNIX_EPOCH)),
+        }
+    }
+
+    fn wait_for_our_turn(&self) {
+        let mut last_update = self.last_req.lock().unwrap();
+        loop {
+            let now = SystemTime::now();
+            if let Ok(since_last_req) = now.duration_since(*last_update) {
+                trace!("Time since last request: {}s", since_last_req.as_secs());
+                if since_last_req.as_secs() > 2 {
+                    trace!("Enough time has passed, we get to fetch!");
+                    *last_update = now;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn get(&self, path: &str) -> reqwest::Result<Response> {
+        self.wait_for_our_turn();
+        self.inner
+            .get(format!("https://data.commoncrawl.org/{}", path))
+            .send()
     }
 }
 
@@ -290,22 +330,10 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
 
 pub fn get_records(
     warc_url: &str,
-    client: Semaphore<Client>,
+    client: Client,
 ) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
-    let client_handle = {
-        loop {
-            if let Ok(guard) = client.try_access() {
-                break guard;
-            }
-        }
-    };
-
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
-        client_handle
-            .get(format!("http://data.commoncrawl.org/{}", warc_url))
-            .header("User-agent", user_agent())
-            .send()?
-            .error_for_status()?,
+        client.get(warc_url)?.error_for_status()?,
     ))));
 
     Ok(warc_reader
@@ -314,9 +342,7 @@ pub fn get_records(
 }
 
 pub fn process_warc(url: &str, client: &Client) -> Result<ArchiveSummary, reqwest::Error> {
-    let limited_getter = Semaphore::new(SIMULTANEOUS_FETCHES, client.clone());
-
-    let summary = get_records(url, limited_getter)?
+    let summary = get_records(url, client.clone())?
         .into_iter()
         .par_bridge()
         .flat_map(ArchiveSummary::from_record)

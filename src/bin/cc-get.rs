@@ -7,8 +7,7 @@ use std::io::BufReader;
 use std::thread;
 use std::time::Duration;
 
-use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
-use reqwest::blocking::Client;
+use bo_cc::{process_warc, processed_warcs, AnalysisWriter, Client};
 
 fn get_warcs(
     client: &Client,
@@ -17,12 +16,7 @@ fn get_warcs(
 ) -> Result<impl Iterator<Item = String>, reqwest::Error> {
     let gz = BufReader::new(
         client
-            .get(format!(
-                "http://data.commoncrawl.org/crawl-data/{}/warc.paths.gz",
-                archive
-            ))
-            .header("User-agent", user_agent())
-            .send()?
+            .get(&format!("crawl-data/{}/warc.paths.gz", archive))?
             .error_for_status()?,
     );
 
@@ -43,7 +37,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Using {} simultaneous connections",
         bo_cc::SIMULTANEOUS_FETCHES
     );
-    let client = Client::new();
+    let client = bo_cc::Client::new();
+
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen, &archive)?;
     info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);
