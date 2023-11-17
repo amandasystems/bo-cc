@@ -8,13 +8,13 @@ use std::thread;
 use std::time::Duration;
 
 use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
+const COOLDOWN_S: f32 = 2.0;
 
 fn get_warcs(
     client: &attohttpc::Session,
     warcs_present: HashSet<String>,
     archive: &str,
 ) -> Result<impl Iterator<Item = String>, attohttpc::Error> {
-    // FIXME this archive is hard-coded!
     let gz = BufReader::new(
         client
             .get(format!(
@@ -39,11 +39,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("Usage: cc-get <archive, e.g. CC-MAIN-2023-40>")?;
 
+    info!(
+        "Using {} simultaneous connections",
+        bo_cc::SIMULTANEOUS_FETCHES
+    );
     let client = attohttpc::Session::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen, &archive)?;
-    println!("Waiting for cooldown...");
-    thread::sleep(Duration::from_secs_f32(2.0));
+    info!("Waiting {}s for cooldown...", COOLDOWN_S);
+    thread::sleep(Duration::from_secs_f32(COOLDOWN_S));
 
     let mut writer = AnalysisWriter::new();
 
@@ -57,7 +61,6 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    info!("All WARCs processed!");
-
+    info!("Shutting down...");
     Ok(())
 }

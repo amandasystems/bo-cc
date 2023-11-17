@@ -25,7 +25,7 @@ use xz2::{read::XzDecoder, write::XzEncoder};
 type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
-const SIMULTANEOUS_FETCHES: usize = 1;
+pub const SIMULTANEOUS_FETCHES: usize = 1;
 
 pub fn user_agent() -> String {
     format!("bo-cc/{}", env!("CARGO_PKG_VERSION"))
