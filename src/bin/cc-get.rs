@@ -8,12 +8,13 @@ use std::thread;
 use std::time::Duration;
 
 use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
+use reqwest::blocking::Client;
 
 fn get_warcs(
-    client: &attohttpc::Session,
+    client: &Client,
     warcs_present: HashSet<String>,
     archive: &str,
-) -> Result<impl Iterator<Item = String>, attohttpc::Error> {
+) -> Result<impl Iterator<Item = String>, reqwest::Error> {
     let gz = BufReader::new(
         client
             .get(format!(
@@ -42,7 +43,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         "Using {} simultaneous connections",
         bo_cc::SIMULTANEOUS_FETCHES
     );
-    let client = attohttpc::Session::new();
+    let client = Client::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen, &archive)?;
     info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);

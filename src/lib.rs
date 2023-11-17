@@ -16,6 +16,7 @@ use httparse::Header;
 use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
+use reqwest::blocking::Client;
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
@@ -289,8 +290,8 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
 
 pub fn get_records(
     warc_url: &str,
-    client: Semaphore<&attohttpc::Session>,
-) -> Result<impl Iterator<Item = WarcRecord>, attohttpc::Error> {
+    client: Semaphore<Client>,
+) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
     let client_handle = {
         loop {
             if let Ok(guard) = client.try_access() {
@@ -312,11 +313,8 @@ pub fn get_records(
         .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
 }
 
-pub fn process_warc(
-    url: &str,
-    client: &attohttpc::Session,
-) -> Result<ArchiveSummary, attohttpc::Error> {
-    let limited_getter = Semaphore::new(SIMULTANEOUS_FETCHES, client);
+pub fn process_warc(url: &str, client: &Client) -> Result<ArchiveSummary, reqwest::Error> {
+    let limited_getter = Semaphore::new(SIMULTANEOUS_FETCHES, client.clone());
 
     let summary = get_records(url, limited_getter)?
         .into_iter()
