@@ -8,7 +8,6 @@ use std::thread;
 use std::time::Duration;
 
 use bo_cc::{process_warc, processed_warcs, user_agent, AnalysisWriter};
-const COOLDOWN_S: f32 = 2.0;
 
 fn get_warcs(
     client: &attohttpc::Session,
@@ -46,15 +45,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     let client = attohttpc::Session::new();
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen, &archive)?;
-    info!("Waiting {}s for cooldown...", COOLDOWN_S);
-    thread::sleep(Duration::from_secs_f32(COOLDOWN_S));
+    info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);
+    thread::sleep(Duration::from_secs_f32(bo_cc::COOLDOWN_S));
 
     let mut writer = AnalysisWriter::new();
 
     for warc_url in warc_urls {
         trace!("Analysing {}", &warc_url);
         match process_warc(&warc_url, &client) {
-            Ok(summary) => writer.write(warc_url, summary)?,
+            Ok(summary) => {
+                writer.write(warc_url, summary)?;
+                info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);
+                thread::sleep(Duration::from_secs_f32(bo_cc::COOLDOWN_S));
+            }
             Err(e) => {
                 error!("Unknown error fetching {}: {}, giving up.", warc_url, e);
                 break;

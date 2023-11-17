@@ -26,6 +26,7 @@ type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
 pub const SIMULTANEOUS_FETCHES: usize = 1;
+pub const COOLDOWN_S: f32 = 2.0;
 
 pub fn user_agent() -> String {
     format!("bo-cc/{}", env!("CARGO_PKG_VERSION"))
