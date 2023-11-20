@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    cmp::min,
     error::Error,
     io::{self, BufReader, ErrorKind},
     sync::{
@@ -19,7 +20,10 @@ use httparse::Header;
 use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
-use reqwest::blocking::{ClientBuilder, Response};
+use reqwest::{
+    blocking::{ClientBuilder, Response},
+    header, StatusCode,
+};
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
@@ -31,6 +35,8 @@ type UrlAndSummary = (String, ArchiveSummary);
 const WRITE_BACKLOG: usize = 32;
 pub const SIMULTANEOUS_FETCHES: usize = 1;
 pub const COOLDOWN_S: f32 = 2.0;
+pub const INITIAL_WAIT: u64 = 3;
+pub const MAX_WAIT: u64 = 300;
 
 pub fn processed_warcs() -> Vec<String> {
     match fs::File::open("forms.d/index") {
@@ -46,27 +52,37 @@ pub fn processed_warcs() -> Vec<String> {
 pub struct Client {
     inner: reqwest::blocking::Client,
     last_req: Arc<Mutex<SystemTime>>,
+    wait_time: Arc<Mutex<u64>>,
 }
 
 impl Client {
     pub fn new() -> Self {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::ACCEPT_ENCODING,
+            header::HeaderValue::from_static("identity"),
+        );
+
         Client {
             inner: ClientBuilder::new()
                 .user_agent(format!("bo-cc/{}", env!("CARGO_PKG_VERSION")))
                 .connection_verbose(true)
+                .default_headers(headers)
                 .build()
                 .unwrap(),
             last_req: Arc::new(Mutex::new(std::time::UNIX_EPOCH)),
+            wait_time: Arc::new(Mutex::new(INITIAL_WAIT)),
         }
     }
 
     fn wait_for_our_turn(&self) {
         let mut last_update = self.last_req.lock().unwrap();
+        let wait_time = self.wait_time.lock().unwrap();
         loop {
             let now = SystemTime::now();
             if let Ok(since_last_req) = now.duration_since(*last_update) {
                 trace!("Time since last request: {}s", since_last_req.as_secs());
-                if since_last_req.as_secs() > 2 {
+                if since_last_req.as_secs() > *wait_time {
                     trace!("Enough time has passed, we get to fetch!");
                     *last_update = now;
                     break;
@@ -76,10 +92,29 @@ impl Client {
     }
 
     pub fn get(&self, path: &str) -> reqwest::Result<Response> {
-        self.wait_for_our_turn();
-        self.inner
-            .get(format!("https://data.commoncrawl.org/{}", path))
-            .send()
+        loop {
+            self.wait_for_our_turn();
+            let r = self
+                .inner
+                .get(format!("https://data.commoncrawl.org/{}", path))
+                .send()?;
+
+            if r.status().is_success() {
+                let mut wait_time = self.wait_time.lock().unwrap();
+                *wait_time = INITIAL_WAIT;
+                info!("Success! Wait time is now: {}s", *wait_time);
+                break Ok(r);
+            }
+
+            if r.status().is_server_error() {
+                info!("Server returned status {}, retrying", r.status());
+                let mut wait_time = self.wait_time.lock().unwrap();
+                *wait_time = min(2 * *wait_time, MAX_WAIT);
+                info!("Wait time is now: {}s", *wait_time);
+            } else {
+                break Ok(r);
+            }
+        }
     }
 }
 
