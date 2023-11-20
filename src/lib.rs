@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    cmp::min,
     error::Error,
     io::{self, BufReader, ErrorKind},
     sync::{
@@ -20,10 +19,7 @@ use httparse::Header;
 use log::{info, trace, warn};
 use rayon::iter::ParallelBridge;
 use rayon::prelude::ParallelIterator;
-use reqwest::{
-    blocking::{ClientBuilder, Response},
-    header, StatusCode,
-};
+use reqwest::blocking::{ClientBuilder, Response};
 use rust_warc::{WarcReader, WarcRecord};
 use std::fs;
 use std::io::prelude::*;
@@ -33,10 +29,9 @@ use xz2::{read::XzDecoder, write::XzEncoder};
 type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
-pub const SIMULTANEOUS_FETCHES: usize = 1;
 pub const COOLDOWN_S: f32 = 2.0;
-pub const INITIAL_WAIT: u64 = 3;
-pub const MAX_WAIT: u64 = 300;
+pub const INITIAL_WAIT: u64 = 2;
+pub const MAX_WAIT: u64 = 30;
 
 pub fn processed_warcs() -> Vec<String> {
     match fs::File::open("forms.d/index") {
@@ -57,17 +52,11 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Self {
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            header::HeaderValue::from_static("identity"),
-        );
-
         Client {
             inner: ClientBuilder::new()
                 .user_agent(format!("bo-cc/{}", env!("CARGO_PKG_VERSION")))
-                .connection_verbose(true)
-                .default_headers(headers)
+                //.connection_verbose(true)
+                //.default_headers(headers)
                 .build()
                 .unwrap(),
             last_req: Arc::new(Mutex::new(std::time::UNIX_EPOCH)),
@@ -107,10 +96,12 @@ impl Client {
             }
 
             if r.status().is_server_error() {
-                info!("Server returned status {}, retrying", r.status());
+                info!("Server error: {}. Retrying", r.status());
                 let mut wait_time = self.wait_time.lock().unwrap();
-                *wait_time = min(2 * *wait_time, MAX_WAIT);
-                info!("Wait time is now: {}s", *wait_time);
+                if *wait_time < MAX_WAIT {
+                    *wait_time += 1;
+                    info!("Wait time is now: {}s", *wait_time);
+                }
             } else {
                 break Ok(r);
             }

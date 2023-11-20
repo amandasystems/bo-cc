@@ -33,15 +33,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("Usage: cc-get <archive, e.g. CC-MAIN-2023-40>")?;
 
-    info!(
-        "Using {} simultaneous connections",
-        bo_cc::SIMULTANEOUS_FETCHES
-    );
     let client = bo_cc::Client::new();
 
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
     let warc_urls = get_warcs(&client, seen, &archive)?;
-    info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);
     thread::sleep(Duration::from_secs_f32(bo_cc::COOLDOWN_S));
 
     let mut writer = AnalysisWriter::new();
@@ -51,8 +46,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         match process_warc(&warc_url, &client) {
             Ok(summary) => {
                 writer.write(warc_url, summary)?;
-                info!("Waiting {}s for cooldown...", bo_cc::COOLDOWN_S);
-                thread::sleep(Duration::from_secs_f32(bo_cc::COOLDOWN_S));
             }
             Err(e) => {
                 error!("Unknown error fetching {}: {}, giving up.", warc_url, e);
