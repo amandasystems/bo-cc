@@ -30,7 +30,7 @@ type UrlAndSummary = (String, ArchiveSummary);
 
 const WRITE_BACKLOG: usize = 32;
 pub const COOLDOWN_S: f32 = 2.0;
-pub const INITIAL_WAIT: u64 = 2;
+pub const INITIAL_WAIT: u64 = 0;
 pub const MAX_WAIT: u64 = 30;
 
 pub fn processed_warcs() -> Vec<String> {
@@ -67,6 +67,9 @@ impl Client {
     fn wait_for_our_turn(&self) {
         let mut last_update = self.last_req.lock().unwrap();
         let wait_time = self.wait_time.lock().unwrap();
+        if *wait_time == 0 {
+            return;
+        }
         loop {
             let now = SystemTime::now();
             if let Ok(since_last_req) = now.duration_since(*last_update) {
