@@ -1,11 +1,17 @@
 use std::error::Error;
 
-use bo_cc::{processed_warcs, to_storage_fn, ArchiveSummary};
+use bo_cc::{patterns_in, processed_warcs, to_storage_fn, ArchiveSummary};
 use rayon::prelude::*;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let warcs: Vec<_> = processed_warcs();
+enum Cmd {
+    Summary,
+    Patterns,
+    Forms,
+}
+
+fn cmd_summarise(warcs: Vec<String>) {
     let nr_warcs = warcs.len();
+
     let summary = warcs
         .par_iter()
         .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
@@ -37,6 +43,50 @@ fn main() -> Result<(), Box<dyn Error>> {
         nr_forms_with_patterns,
         100f64 * (nr_forms_with_patterns as f64 / total_forms)
     );
+}
+
+fn cmd_forms_with(warcs: Vec<String>) {
+    warcs
+        .par_iter()
+        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
+        .flat_map(|summary| summary.urls_with_pattern_forms)
+        .flat_map(|form_summary| form_summary.with_patterns)
+        .for_each(|form| {
+            let stripped_form = form.replace("\n", "").replace("\r", "");
+            println!("{stripped_form}");
+        });
+}
+
+fn cmd_patterns(warcs: Vec<String>) {
+    warcs
+        .par_iter()
+        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
+        .flat_map(|summary| summary.urls_with_pattern_forms)
+        .flat_map(|form_summary| form_summary.with_patterns)
+        .flat_map(|form| patterns_in(&form))
+        .for_each(|pattern| {
+            println!("{pattern}");
+        });
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let subcommand = std::env::args()
+        .nth(1)
+        .and_then(|arg| match arg.as_str() {
+            "summary" => Some(Cmd::Summary),
+            "patterns" => Some(Cmd::Patterns),
+            "forms" => Some(Cmd::Forms),
+            _ => None,
+        })
+        .ok_or("usage: cc-get summary | patterns | forms")?;
+
+    let warcs: Vec<_> = processed_warcs();
+
+    match subcommand {
+        Cmd::Summary => cmd_summarise(warcs),
+        Cmd::Patterns => cmd_patterns(warcs),
+        Cmd::Forms => cmd_forms_with(warcs),
+    }
 
     Ok(())
 }

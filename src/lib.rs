@@ -317,6 +317,49 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
     }
 }
 
+pub fn patterns_in(form: &str) -> Vec<String> {
+    let dom = tl::parse(form, tl::ParserOptions::default()).unwrap();
+    let parser = dom.parser();
+
+    let inputs = dom
+        .query_selector("input[pattern],input[data-val-regex-pattern],input[ng-pattern]")
+        .unwrap()
+        .filter_map(|handle| handle.get(parser).and_then(|n| n.as_tag()));
+
+    let mut patterns = Vec::default();
+    for tag in inputs {
+        let attributes = tag.attributes();
+        if let Some(pattern) = attributes
+            .get("pattern")
+            .flatten()
+            .and_then(|p| p.try_as_utf8_str())
+            .map(|p| p.to_owned())
+        {
+            patterns.push(pattern)
+        }
+
+        if let Some(pattern) = attributes
+            .get("data-val-regex-pattern")
+            .flatten()
+            .and_then(|p| p.try_as_utf8_str())
+            .map(|p| p.to_owned())
+        {
+            patterns.push(pattern)
+        }
+
+        if let Some(pattern) = attributes
+            .get("ng-pattern")
+            .flatten()
+            .and_then(|p| p.try_as_utf8_str())
+            .map(|p| p.to_owned())
+        {
+            patterns.push(pattern)
+        }
+    }
+
+    patterns
+}
+
 fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
     let body = decode_body(content)?;
     let dom = tl::parse(&body, tl::ParserOptions::default()).unwrap();
