@@ -20,10 +20,10 @@ fn cmd_summarise(warcs: Vec<String>) {
         nr_unknown_encoding,
         successful_urls,
     ) = warcs
-        .iter()
+        .into_par_iter()
         .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
         .fold(
-            (0, 0, 0, 0, 0, 0),
+            || (0, 0, 0, 0, 0, 0),
             |(
                 urls_with_pattern,
                 total_urls,
@@ -48,6 +48,19 @@ fn cmd_summarise(warcs: Vec<String>) {
                     total_forms + next_forms_w_pattern + next.nr_forms_without_patterns,
                     unknown_encoding + next.nr_unknown_encoding,
                     successful_urls + successful,
+                )
+            },
+        )
+        .reduce(
+            || (0, 0, 0, 0, 0, 0),
+            |l, r| {
+                (
+                    l.0 + r.0,
+                    l.1 + r.1,
+                    l.2 + r.2,
+                    l.3 + r.3,
+                    l.4 + r.4,
+                    l.5 + r.5,
                 )
             },
         );
