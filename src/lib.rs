@@ -3,11 +3,12 @@ use std::{
     error::Error,
     io::{self, BufReader, ErrorKind},
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, SendError},
-        Arc, Mutex,
+        Arc,
     },
     thread,
-    time::SystemTime,
+    time::{Duration, Instant},
 };
 const COMPRESSION_LEVEL: u32 = 6;
 use serde::{Deserialize, Serialize};
@@ -46,8 +47,10 @@ pub fn processed_warcs() -> Vec<String> {
 #[derive(Clone)]
 pub struct Client {
     inner: reqwest::blocking::Client,
-    last_req: Arc<Mutex<SystemTime>>,
-    wait_time: Arc<Mutex<u64>>,
+    started_at: Instant,
+    /// Offset in seconds since started_at of the last request
+    last_req: Arc<AtomicU64>,
+    wait_time: Arc<AtomicU64>,
 }
 
 impl Client {
@@ -59,51 +62,64 @@ impl Client {
                 //.default_headers(headers)
                 .build()
                 .unwrap(),
-            last_req: Arc::new(Mutex::new(std::time::UNIX_EPOCH)),
-            wait_time: Arc::new(Mutex::new(INITIAL_WAIT)),
+            started_at: Instant::now(),
+            last_req: Arc::new(AtomicU64::new(INITIAL_WAIT)),
+            wait_time: Arc::new(AtomicU64::new(INITIAL_WAIT)),
         }
     }
 
-    fn wait_for_our_turn(&self) {
-        let mut last_update = self.last_req.lock().unwrap();
-        let wait_time = self.wait_time.lock().unwrap();
-        if *wait_time == 0 {
+    fn wait_for_our_turn(&mut self) {
+        if self.wait_time.load(Ordering::SeqCst) == 0 {
             return;
         }
         loop {
-            let now = SystemTime::now();
-            if let Ok(since_last_req) = now.duration_since(*last_update) {
-                trace!("Time since last request: {}s", since_last_req.as_secs());
-                if since_last_req.as_secs() > *wait_time {
-                    trace!("Enough time has passed, we get to fetch!");
-                    *last_update = now;
-                    break;
-                }
+            let seen_last_req = self.last_req.load(Ordering::SeqCst);
+            let offset_to_last_req = self.started_at + Duration::new(seen_last_req, 0);
+            let s_passed = (Instant::now() - offset_to_last_req).as_secs();
+            trace!("Time since last request: {}s", s_passed);
+            if s_passed > self.wait_time.load(Ordering::SeqCst) {
+                trace!("Enough time has passed, we get to fetch!");
+                let _ = self.last_req.compare_exchange_weak(
+                    seen_last_req,
+                    (Instant::now() - self.started_at).as_secs(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                break;
             }
         }
     }
 
-    pub fn get(&self, path: &str) -> reqwest::Result<Response> {
+    pub fn get(&mut self, path: &str) -> reqwest::Result<Response> {
         loop {
             self.wait_for_our_turn();
+
             let r = self
                 .inner
                 .get(format!("https://data.commoncrawl.org/{}", path))
                 .send()?;
 
             if r.status().is_success() {
-                let mut wait_time = self.wait_time.lock().unwrap();
-                *wait_time = INITIAL_WAIT;
-                info!("Success! Wait time is now: {}s", *wait_time);
+                self.wait_time.store(INITIAL_WAIT, Ordering::SeqCst);
+                info!(
+                    "Success! Wait time is now: {}s",
+                    self.wait_time.load(Ordering::SeqCst)
+                );
                 break Ok(r);
             }
 
             if r.status().is_server_error() {
                 info!("Server error: {}. Retrying", r.status());
-                let mut wait_time = self.wait_time.lock().unwrap();
-                if *wait_time < MAX_WAIT {
-                    *wait_time += 1;
-                    info!("Wait time is now: {}s", *wait_time);
+                let seen_wait_time = self.wait_time.load(Ordering::SeqCst);
+                if seen_wait_time < MAX_WAIT {
+                    if let Ok(new_time) = self.wait_time.compare_exchange(
+                        seen_wait_time,
+                        seen_wait_time + 1,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        info!("Wait time is now: {}s", new_time);
+                    };
                 }
             } else {
                 break Ok(r);
@@ -402,7 +418,7 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
 
 pub fn get_records(
     warc_url: &str,
-    client: Client,
+    mut client: Client,
 ) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
         client.get(warc_url)?.error_for_status()?,
@@ -415,7 +431,6 @@ pub fn get_records(
 
 pub fn process_warc(url: &str, client: &Client) -> Result<ArchiveSummary, reqwest::Error> {
     let summary = get_records(url, client.clone())?
-        .into_iter()
         .par_bridge()
         .flat_map(ArchiveSummary::from_record)
         .reduce(ArchiveSummary::default, |a, b| a.merge(b));

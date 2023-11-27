@@ -83,11 +83,11 @@ fn cmd_summarise(warcs: Vec<String>) {
 fn cmd_forms_with(warcs: Vec<String>) {
     warcs
         .par_iter()
-        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
+        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(warc)))
         .flat_map(|summary| summary.urls_with_pattern_forms)
         .flat_map(|form_summary| form_summary.with_patterns)
         .for_each(|form| {
-            let stripped_form = form.replace("\n", "").replace("\r", "");
+            let stripped_form = form.replace(['\n', '\r'], "");
             println!("{stripped_form}");
         });
 }
@@ -95,7 +95,7 @@ fn cmd_forms_with(warcs: Vec<String>) {
 fn cmd_patterns(warcs: Vec<String>) {
     warcs
         .par_iter()
-        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
+        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(warc)))
         .flat_map(|summary| summary.urls_with_pattern_forms)
         .flat_map(|form_summary| form_summary.with_patterns)
         .flat_map(|form| patterns_in(&form))

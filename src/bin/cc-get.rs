@@ -4,13 +4,11 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
-use std::thread;
-use std::time::Duration;
 
 use bo_cc::{process_warc, processed_warcs, AnalysisWriter, Client};
 
 fn get_warcs(
-    client: &Client,
+    client: &mut Client,
     warcs_present: HashSet<String>,
     archive: &str,
 ) -> Result<impl Iterator<Item = String>, reqwest::Error> {
@@ -33,11 +31,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .nth(1)
         .ok_or("Usage: cc-get <archive, e.g. CC-MAIN-2023-40>")?;
 
-    let client = bo_cc::Client::new();
+    let mut client = bo_cc::Client::new();
 
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
-    let warc_urls = get_warcs(&client, seen, &archive)?;
-    thread::sleep(Duration::from_secs_f32(bo_cc::COOLDOWN_S));
+    let warc_urls = get_warcs(&mut client, seen, &archive)?;
 
     let mut writer = AnalysisWriter::new();
 
