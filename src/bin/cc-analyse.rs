@@ -9,6 +9,23 @@ enum Cmd {
     Forms,
 }
 
+type Tally = (i64, i64, i64, i64, i64, i64);
+
+fn identity_tally() -> Tally {
+    (0, 0, 0, 0, 0, 0)
+}
+
+fn elementwise_sum(l: Tally, r: Tally) -> Tally {
+    (
+        l.0 + r.0,
+        l.1 + r.1,
+        l.2 + r.2,
+        l.3 + r.3,
+        l.4 + r.4,
+        l.5 + r.5,
+    )
+}
+
 fn cmd_summarise(warcs: Vec<String>) {
     let nr_warcs = warcs.len();
 
@@ -21,49 +38,28 @@ fn cmd_summarise(warcs: Vec<String>) {
         successful_urls,
     ) = warcs
         .into_par_iter()
-        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(&warc)))
-        .fold(
-            || (0, 0, 0, 0, 0, 0),
-            |(
-                urls_with_pattern,
+        .flat_map(|warc| {
+            let summary = ArchiveSummary::from_file(&to_storage_fn(&warc))?;
+            let urls_w_pattern = summary.urls_with_pattern_forms.len() as i64;
+            let successful = urls_w_pattern + summary.nr_urls_without_patterns;
+            let forms_w_pattern: i64 = summary
+                .urls_with_pattern_forms
+                .iter()
+                .map(|u| u.with_patterns.len() as i64)
+                .sum();
+            let total_urls = successful + summary.nr_unknown_encoding;
+            let total_forms = forms_w_pattern + summary.nr_forms_without_patterns;
+
+            Ok::<_, std::io::Error>((
+                urls_w_pattern,
                 total_urls,
                 forms_w_pattern,
                 total_forms,
-                unknown_encoding,
-                successful_urls,
-            ),
-             next| {
-                let next_urls_w_pattern = next.urls_with_pattern_forms.len() as i64;
-                let successful = next_urls_w_pattern + next.nr_urls_without_patterns;
-                let next_forms_w_pattern: i64 = next
-                    .urls_with_pattern_forms
-                    .iter()
-                    .map(|u| u.with_patterns.len() as i64)
-                    .sum();
-
-                (
-                    urls_with_pattern + next_urls_w_pattern,
-                    total_urls + successful + next.nr_unknown_encoding,
-                    forms_w_pattern + next_forms_w_pattern,
-                    total_forms + next_forms_w_pattern + next.nr_forms_without_patterns,
-                    unknown_encoding + next.nr_unknown_encoding,
-                    successful_urls + successful,
-                )
-            },
-        )
-        .reduce(
-            || (0, 0, 0, 0, 0, 0),
-            |l, r| {
-                (
-                    l.0 + r.0,
-                    l.1 + r.1,
-                    l.2 + r.2,
-                    l.3 + r.3,
-                    l.4 + r.4,
-                    l.5 + r.5,
-                )
-            },
-        );
+                summary.nr_unknown_encoding,
+                successful,
+            ))
+        })
+        .reduce(identity_tally, elementwise_sum);
 
     println!("Processed {nr_warcs} WARCs with {total_urls} URLs ({successful_urls} OK). Results: ");
     println!(
