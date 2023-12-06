@@ -1,11 +1,11 @@
 use flate2::read::MultiGzDecoder;
-use log::{error, info, trace};
+use log::info;
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::prelude::*;
 use std::io::BufReader;
 
-use bo_cc::{process_warc, processed_warcs, AnalysisWriter, Client};
+use bo_cc::{process_warcs, processed_warcs, Client};
 
 fn get_warcs(
     client: &mut Client,
@@ -34,22 +34,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut client = bo_cc::Client::new();
 
     let seen: HashSet<String> = processed_warcs().into_iter().collect();
-    let warc_urls = get_warcs(&mut client, seen, &archive)?;
+    let warc_urls = get_warcs(&mut client, seen, &archive)?.collect();
 
-    let mut writer = AnalysisWriter::new();
+    process_warcs(warc_urls, client);
 
-    for warc_url in warc_urls {
-        trace!("Analysing {}", &warc_url);
-        match process_warc(&warc_url, &client) {
-            Ok(summary) => {
-                writer.write(warc_url, summary)?;
-            }
-            Err(e) => {
-                error!("Unknown error fetching {}: {}, giving up.", warc_url, e);
-                break;
-            }
-        }
-    }
     info!("Shutting down...");
     Ok(())
 }

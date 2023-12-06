@@ -5,7 +5,7 @@ use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, SendError},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -17,15 +17,17 @@ use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
 use flate2::read::MultiGzDecoder;
 use httparse::Header;
-use log::{info, trace, warn};
-use rayon::iter::ParallelBridge;
+use log::{error, info, trace, warn};
+use rayon::iter::{IntoParallelIterator, ParallelBridge};
 use rayon::prelude::ParallelIterator;
 use reqwest::blocking::{ClientBuilder, Response};
-use rust_warc::{WarcReader, WarcRecord};
+use rust_warc::{CaseString, WarcReader};
 use std::fs;
 use std::io::prelude::*;
 use std::io::BufWriter;
 use xz2::{read::XzDecoder, write::XzEncoder};
+#[macro_use]
+extern crate lazy_static;
 
 type UrlAndSummary = (String, ArchiveSummary);
 
@@ -33,6 +35,9 @@ const WRITE_BACKLOG: usize = 32;
 pub const COOLDOWN_S: f32 = 2.0;
 pub const INITIAL_WAIT: u64 = 0;
 pub const MAX_WAIT: u64 = 30;
+lazy_static! {
+    static ref WARC_TYPE: CaseString = CaseString::from("WARC-Type");
+}
 
 pub fn processed_warcs() -> Vec<String> {
     match fs::File::open("forms.d/index") {
@@ -416,24 +421,41 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
     Ok((nr_forms, interesting_forms))
 }
 
-pub fn get_records(
-    warc_url: &str,
-    mut client: Client,
-) -> Result<impl Iterator<Item = WarcRecord>, reqwest::Error> {
+fn process_warc(url: &str, client: Client) -> Result<ArchiveSummary, reqwest::Error> {
     let warc_reader = WarcReader::new(BufReader::new(MultiGzDecoder::new(BufReader::new(
-        client.get(warc_url)?.error_for_status()?,
+        client.clone().get(url)?.error_for_status()?,
     ))));
 
-    Ok(warc_reader
-        .filter_map(|r| r.ok())
-        .filter(|r| r.header.get(&"WARC-Type".into()) == Some(&"response".into())))
-}
-
-pub fn process_warc(url: &str, client: &Client) -> Result<ArchiveSummary, reqwest::Error> {
-    let summary = get_records(url, client.clone())?
+    let summary = warc_reader
         .par_bridge()
+        .filter_map(|r| r.ok())
+        .filter(|r| r.header.get(&WARC_TYPE) == Some(&"response".into()))
         .flat_map(ArchiveSummary::from_record)
         .reduce(ArchiveSummary::default, |a, b| a.merge(b));
+
     info!("Done with WARC ID {}", &url);
+
     Ok(summary)
+}
+
+pub fn process_warcs(urls: Vec<String>, client: Client) {
+    let writer = Arc::new(Mutex::new(AnalysisWriter::new()));
+
+    urls.into_par_iter()
+        .map(move |url| {
+            let summary = process_warc(&url, client.clone());
+            (url, summary)
+        })
+        .for_each(|(url, summary)| match summary {
+            Ok(summary) => {
+                writer
+                    .lock()
+                    .expect("Could not get lock on writer!")
+                    .write(url, summary)
+                    .expect("Could not write URL summary!");
+            }
+            Err(e) => {
+                error!("Unknown error fetching {}: {}", url, e);
+            }
+        });
 }
