@@ -338,6 +338,40 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
     }
 }
 
+fn interesting_patterns<'a>(attributes: &'a tl::Attributes<'_>) -> impl Iterator<Item = &'a str> {
+    ["pattern", "data-val-regex-pattern", "ng-pattern"]
+        .into_iter()
+        .flat_map(|attr| {
+            attributes
+                .get(attr)
+                .flatten()
+                .and_then(|p| p.try_as_utf8_str())
+        })
+}
+
+pub fn elements_with(form: &str, pattern: &str) -> Vec<String> {
+    let dom = tl::parse(form, tl::ParserOptions::default()).unwrap();
+    let parser = dom.parser();
+    let query = "input[pattern],input[data-val-regex-pattern],input[ng-pattern]";
+    if let Some(matches) = dom.query_selector(query) {
+        matches
+            .filter_map(|handle| handle.get(parser).and_then(|n| n.as_tag()))
+            .filter(|input_tag| {
+                interesting_patterns(input_tag.attributes())
+                    .find(|&tag_pattern| tag_pattern == pattern)
+                    .is_some()
+            })
+            .map(|input_tag| {
+                let (start, end) = input_tag.boundaries(parser);
+                let tag_text = &form[start..=end]; // This is faster than innerHTML
+                tag_text.to_owned()
+            })
+            .collect()
+    } else {
+        panic!("Invalid query: {query}");
+    }
+}
+
 pub fn patterns_in(form: &str) -> Vec<String> {
     let dom = tl::parse(form, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
@@ -350,32 +384,7 @@ pub fn patterns_in(form: &str) -> Vec<String> {
     let mut patterns = Vec::default();
     for tag in inputs {
         let attributes = tag.attributes();
-        if let Some(pattern) = attributes
-            .get("pattern")
-            .flatten()
-            .and_then(|p| p.try_as_utf8_str())
-            .map(|p| p.to_owned())
-        {
-            patterns.push(pattern)
-        }
-
-        if let Some(pattern) = attributes
-            .get("data-val-regex-pattern")
-            .flatten()
-            .and_then(|p| p.try_as_utf8_str())
-            .map(|p| p.to_owned())
-        {
-            patterns.push(pattern)
-        }
-
-        if let Some(pattern) = attributes
-            .get("ng-pattern")
-            .flatten()
-            .and_then(|p| p.try_as_utf8_str())
-            .map(|p| p.to_owned())
-        {
-            patterns.push(pattern)
-        }
+        patterns.extend(interesting_patterns(attributes).map(|a| a.to_owned()));
     }
 
     patterns

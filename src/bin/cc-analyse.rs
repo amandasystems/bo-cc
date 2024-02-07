@@ -1,12 +1,14 @@
 use std::error::Error;
+use std::io::{self, BufRead};
 
-use bo_cc::{patterns_in, processed_warcs, to_storage_fn, ArchiveSummary};
+use bo_cc::{elements_with, patterns_in, processed_warcs, to_storage_fn, ArchiveSummary};
 use rayon::prelude::*;
 
 enum Cmd {
     Summary,
     Patterns,
     Forms,
+    FindPattern,
 }
 
 type Tally = (i64, i64, i64, i64, i64, i64);
@@ -93,10 +95,41 @@ fn cmd_patterns(warcs: Vec<String>) {
         .par_iter()
         .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(warc)))
         .flat_map(|summary| summary.urls_with_pattern_forms)
-        .flat_map(|form_summary| form_summary.with_patterns)
+        .flat_map(|url_summary| url_summary.with_patterns)
         .flat_map(|form| patterns_in(&form))
         .for_each(|pattern| {
             println!("{pattern}");
+        });
+}
+
+fn cmd_find_pattern(warcs: Vec<String>) {
+    let stdin = io::stdin();
+    let pattern = stdin.lock().lines().next().unwrap().unwrap();
+    println!("Searching for forms containing {pattern}...");
+    warcs
+        .par_iter()
+        .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(warc)))
+        .flat_map(|summary| summary.urls_with_pattern_forms)
+        .filter_map(|url_summary| {
+            let matching_elements: Vec<String> = url_summary
+                .with_patterns
+                .into_iter()
+                .flat_map(|form| elements_with(&form, &pattern))
+                .collect();
+
+            if matching_elements.is_empty() {
+                None
+            } else {
+                Some((url_summary.url, matching_elements))
+            }
+        })
+        .for_each(|(url, matching_elements)| {
+            println!("URL: {url}");
+            for element in matching_elements.into_iter() {
+                println!("<!-- BEGIN FORM --!>");
+                println!("{element}");
+                println!("<!-- END FORM --!>")
+            }
         });
 }
 
@@ -107,6 +140,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "summary" => Some(Cmd::Summary),
             "patterns" => Some(Cmd::Patterns),
             "forms" => Some(Cmd::Forms),
+            "find-pattern" => Some(Cmd::FindPattern),
             _ => None,
         })
         .ok_or("usage: cc-get summary | patterns | forms")?;
@@ -117,6 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Cmd::Summary => cmd_summarise(warcs),
         Cmd::Patterns => cmd_patterns(warcs),
         Cmd::Forms => cmd_forms_with(warcs),
+        Cmd::FindPattern => cmd_find_pattern(warcs),
     }
 
     Ok(())

@@ -3,3 +3,4 @@ form_validation.db
 .DS_Store
 *.db-shm
 *.db-wal
+forms.d
