@@ -5,13 +5,12 @@ Selective logging highly suggested when gathering data:
 
 ```
 $ cargo build --release
-$ RUST_LOG="info,sqlx::query=warn" ./target/release/bo-cc
+$ ./target/release/bo-cc CC-MAIN-2023-40
 ```
 
 Post-analysis:
 ```
-$ python3 -m venv .venv
-$ ./.venv/bin/pip3 install selectolax
-$ ./analyse-data.py with-validation | ./extract-patterns.py > patterns.txt
-
+$ ./target/release/bo-analyse patterns
+<a long list of patterns>
+$ ./target/release/bo-analyse summary
 ```
