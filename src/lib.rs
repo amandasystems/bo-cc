@@ -25,6 +25,7 @@ use rust_warc::{CaseString, WarcReader};
 use std::fs;
 use std::io::prelude::*;
 use std::io::BufWriter;
+use tl::Parser;
 use xz2::{read::XzDecoder, write::XzEncoder};
 #[macro_use]
 extern crate lazy_static;
@@ -35,6 +36,8 @@ const WRITE_BACKLOG: usize = 32;
 pub const COOLDOWN_S: f32 = 2.0;
 pub const INITIAL_WAIT: u64 = 0;
 pub const MAX_WAIT: u64 = 30;
+const INPUT_ELEMENTS_QUERY: &str = "input[pattern],input[data-val-regex-pattern],input[ng-pattern]";
+
 lazy_static! {
     static ref WARC_TYPE: CaseString = CaseString::from("WARC-Type");
 }
@@ -338,7 +341,7 @@ fn decode_body(body: &[u8]) -> Result<Cow<str>, Box<dyn Error>> {
     }
 }
 
-fn interesting_patterns<'a>(attributes: &'a tl::Attributes<'_>) -> impl Iterator<Item = &'a str> {
+pub fn interesting_patterns<'a>(attributes: &'a tl::Attributes<'_>) -> impl Iterator<Item = &'a str> {
     ["pattern", "data-val-regex-pattern", "ng-pattern"]
         .into_iter()
         .flat_map(|attr| {
@@ -349,27 +352,44 @@ fn interesting_patterns<'a>(attributes: &'a tl::Attributes<'_>) -> impl Iterator
         })
 }
 
-pub fn elements_with(form: &str, pattern: &str) -> Vec<String> {
+pub fn elements_matching_query<F, M, X>(
+    form: &str,
+    query: &str,
+    tag_filter: F,
+    tag_map: M,
+) -> Vec<X>
+where
+    M: Fn(&tl::HTMLTag, &Parser) -> X,
+    F: Fn(&tl::HTMLTag) -> bool,
+{
     let dom = tl::parse(form, tl::ParserOptions::default()).unwrap();
     let parser = dom.parser();
-    let query = "input[pattern],input[data-val-regex-pattern],input[ng-pattern]";
-    if let Some(matches) = dom.query_selector(query) {
-        matches
-            .filter_map(|handle| handle.get(parser).and_then(|n| n.as_tag()))
-            .filter(|input_tag| {
-                interesting_patterns(input_tag.attributes())
-                    .find(|&tag_pattern| tag_pattern == pattern)
-                    .is_some()
-            })
-            .map(|input_tag| {
-                let (start, end) = input_tag.boundaries(parser);
-                let tag_text = &form[start..=end]; // This is faster than innerHTML
-                tag_text.to_owned()
-            })
-            .collect()
-    } else {
-        panic!("Invalid query: {query}");
-    }
+    let matches = dom
+        .query_selector(query)
+        .expect(&format!("Invalid query: {query}"));
+
+    matches
+        .filter_map(|handle| handle.get(parser).and_then(|n| n.as_tag()))
+        .filter(|&tag| tag_filter(tag))
+        .map(|t| tag_map(t, parser))
+        .collect()
+}
+
+pub fn elements_with(form: &str, pattern: &str) -> Vec<String> {
+    elements_matching_query(
+        form,
+        INPUT_ELEMENTS_QUERY,
+        |input_tag| {
+            interesting_patterns(input_tag.attributes())
+                .find(|&tag_pattern| tag_pattern == pattern)
+                .is_some()
+        },
+        |input_tag, parser| {
+            let (start, end) = input_tag.boundaries(parser);
+            let tag_text = &form[start..=end]; // This is faster than innerHTML
+            tag_text.to_owned()
+        },
+    )
 }
 
 pub fn patterns_in(form: &str) -> Vec<String> {
@@ -377,7 +397,7 @@ pub fn patterns_in(form: &str) -> Vec<String> {
     let parser = dom.parser();
 
     let inputs = dom
-        .query_selector("input[pattern],input[data-val-regex-pattern],input[ng-pattern]")
+        .query_selector(INPUT_ELEMENTS_QUERY)
         .unwrap()
         .filter_map(|handle| handle.get(parser).and_then(|n| n.as_tag()));
 
@@ -413,9 +433,7 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
             .any(|tag| {
                 let attributes = tag.attributes();
                 tag.name().as_bytes() == b"input"
-                    && (attributes.contains("pattern")
-                        || attributes.contains("data-val-regex-pattern")
-                        || attributes.contains("ng-pattern"))
+                    && attributes_have_pattern(attributes)
             })
         {
             let (start, end) = form.boundaries(parser);
@@ -428,6 +446,12 @@ fn extract_forms(content: &[u8]) -> Result<(i64, Vec<String>), Box<dyn Error>> {
         }
     }
     Ok((nr_forms, interesting_forms))
+}
+
+pub fn attributes_have_pattern(attributes: &tl::Attributes) -> bool {
+    attributes.contains("pattern")
+                        || attributes.contains("data-val-regex-pattern")
+                        || attributes.contains("ng-pattern")
 }
 
 fn process_warc(url: &str, client: Client) -> Result<ArchiveSummary, reqwest::Error> {

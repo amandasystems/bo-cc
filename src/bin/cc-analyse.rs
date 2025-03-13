@@ -1,7 +1,9 @@
 use std::error::Error;
 use std::io::{self, BufRead};
 
-use bo_cc::{elements_with, patterns_in, processed_warcs, to_storage_fn, ArchiveSummary};
+use bo_cc::{
+    attributes_have_pattern, elements_matching_query, elements_with, interesting_patterns, patterns_in, processed_warcs, to_storage_fn, ArchiveSummary
+};
 use rayon::prelude::*;
 
 enum Cmd {
@@ -9,6 +11,86 @@ enum Cmd {
     Patterns,
     Forms,
     FindPattern,
+    FindInput,
+    Help,
+}
+
+impl Cmd {
+    fn run(&self, warcs: Vec<String>) {
+        match self {
+            Cmd::Summary => cmd_summarise(warcs),
+            Cmd::Patterns => cmd_patterns(warcs),
+            Cmd::Forms => cmd_forms_with(warcs),
+            Cmd::FindPattern => cmd_find_pattern(warcs),
+            Cmd::FindInput => Self::find_input(warcs),
+            Cmd::Help => Self::help(),
+        }
+    }
+
+    fn from_string(maybe_a_command: &str) -> Option<Self> {
+        match maybe_a_command {
+            "summary" => Some(Cmd::Summary),
+            "patterns" => Some(Cmd::Patterns),
+            "forms" => Some(Cmd::Forms),
+            "find-pattern" => Some(Cmd::FindPattern),
+            "find-input" => Some(Cmd::FindInput),
+            _ => None,
+        }
+    }
+
+    fn parse_args() -> Self {
+        std::env::args()
+            .nth(1)
+            .and_then(|s| Cmd::from_string(&s))
+            .unwrap_or(Cmd::Help)
+    }
+
+    fn find_input(warcs: Vec<String>) {
+        let stdin = io::stdin();
+        eprintln!("Element query on stdin...");
+        let element_query = stdin.lock().lines().next().unwrap().unwrap();
+        eprintln!("Looking for elements matching {element_query}...");
+        warcs
+            .par_iter()
+            .flat_map(|warc| ArchiveSummary::from_file(&to_storage_fn(warc)))
+            .flat_map(|summary| summary.urls_with_pattern_forms)
+            .filter_map(|url_summary| {
+                let matching_elements: Vec<String> = url_summary
+                    .with_patterns
+                    .into_iter()
+                    .flat_map(|form| {
+                        elements_matching_query(
+                            &form,
+                            &element_query,
+                            |tag| {
+                                attributes_have_pattern(tag.attributes())
+                            },
+                            |input_tag, _| {
+                                let attributes = input_tag.attributes();
+                                interesting_patterns(attributes).map(|a| a.to_owned()).collect()
+                            },
+                        )
+                    })
+                    .collect();
+
+                if matching_elements.is_empty() {
+                    None
+                } else {
+                    Some((url_summary.url, matching_elements))
+                }
+            })
+            .for_each(|(_, matching_elements)| {
+                for element in matching_elements.into_iter() {
+                    let element = element.trim();
+                    if !(element.is_empty()){
+                    println!("{element}");
+}                }
+            });
+    }
+
+    fn help() {
+        println!("Usage: cc-get summary | patterns | forms | find-input");
+    }
 }
 
 type Tally = (i64, i64, i64, i64, i64, i64);
@@ -134,25 +216,6 @@ fn cmd_find_pattern(warcs: Vec<String>) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let subcommand = std::env::args()
-        .nth(1)
-        .and_then(|arg| match arg.as_str() {
-            "summary" => Some(Cmd::Summary),
-            "patterns" => Some(Cmd::Patterns),
-            "forms" => Some(Cmd::Forms),
-            "find-pattern" => Some(Cmd::FindPattern),
-            _ => None,
-        })
-        .ok_or("usage: cc-get summary | patterns | forms")?;
-
-    let warcs: Vec<_> = processed_warcs();
-
-    match subcommand {
-        Cmd::Summary => cmd_summarise(warcs),
-        Cmd::Patterns => cmd_patterns(warcs),
-        Cmd::Forms => cmd_forms_with(warcs),
-        Cmd::FindPattern => cmd_find_pattern(warcs),
-    }
-
+    Cmd::parse_args().run(processed_warcs());
     Ok(())
 }
